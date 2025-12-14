@@ -1,0 +1,41 @@
+[package]
+name = "pioneer-exporter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# XML parsing for Rhythmbox
+quick-xml = "0.37"
+
+# PDB/ANLZ format reference and validation
+rekordcrate = "0.3"
+binrw = "0.14"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# File operations
+walkdir = "2.5"
+
+# Serialization (for data structures)
+serde = { version = "1.0", features = ["derive"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# URL decoding for file:// URIs
+urlencoding = "2.1"
+
+# MD5 for track ID generation
+md5 = "0.7"
+
+# Shell expansion for ~ in paths
+shellexpand = "3.1"
+
+[dev-dependencies]
+tempfile = "3.14"
