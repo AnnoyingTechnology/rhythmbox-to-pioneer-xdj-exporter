@@ -2,27 +2,42 @@
 
 This document describes the phased implementation approach for the Rhythmbox → Pioneer USB exporter.
 
-## Current Status (2025-12-14)
+## Current Status (2025-12-16)
 
-**Phase:** Phase 1 - Complete and Validated
-**Status:** ✅ All PDB tables validate with rekordcrate. Ready for hardware testing.
-**Next Step:** Test on XDJ-XZ hardware
+**Phase:** Phase 1 – still failing on hardware  
+**Status:** ✅ PDB passes rekordcrate with the latest changes; ❌ XDJ shows an empty USB browser (no message).  
+**Reference:** A valid Rekordbox export is available at `examples/PIONEER/rekordbox/export.pdb` (playlists REKORDBOX1/2) and must be treated as the source of truth for byte-level comparison.
 
-### Summary
+## Updated Assessment (after cleaning the reference export)
+- Confirmed: the XDJ loads fine with only the reference `export.pdb` present. All USBANLZ contents (`*.DAT/EXT`), `.nxs` setting files, and `exportExt.pdb` can be removed and the device still browses correctly.  
+- Implication: the blank/empty browser issue is entirely PDB-driven; exportExt/ANLZ/settings files are not blockers.  
+- Primary deltas that remain between our PDB and the reference (same tracks/playlists):
+  1. **Columns table empty** in our file vs 27 populated rows in the reference; reference uses column definitions to render the browser UI.  
+  2. **Page topology/pointers differ**: reference spreads tables across non-contiguous page indices with dedicated empty-candidate pages at the end; our PDB packs tables sequentially (header→data→empty per table) with `last_page` and `empty_candidate` much smaller.  
+  3. **Track field content gaps**: most tempo/BPM values are zero, several years are corrupted (e.g., 3971), and date strings (date_added/analyze_date) are blank; reference has BPM*100, sane years, and populated dates.  
+  4. **Entity tables missing data**: labels/keys/colors/history are populated in the reference but empty in ours; playlist entry ordering differs slightly (track_ids in REKORDBOX2).  
+- Likely blockers for the XDJ blank page (given exportExt/ANLZ are irrelevant):  
+  - Missing Columns table data needed for browser layout.  
+  - Non-reference page layout/pointers (sequential packing vs spaced indices and shared empty-candidate region).  
+  - Invalid/empty per-track fields (tempo/year/dates) causing tracks to be ignored.  
+  - Missing keys/colors/labels/history tables that the device may expect to exist/populate.
 
-After three debugging rounds, the Pioneer USB exporter successfully generates valid PDB files that pass rekordcrate validation. The journey involved fixing:
+### What’s new in the writer (latest round)
+- Header defaults aligned to the reference: header pages use `num_rows_large=0x1fff`, `unknown6=0x03ec`, track header `unknown1=0x3e/unknown7=1`, history header `unknown1=0x12`; header metadata patched to `next_unused_page`, `unknown=5`, `sequence=0x44`.
+- Data pages: row-group layout fixed (offsets + flags + unknown16 per group), row offsets stored relative to heap start (not `HEAP_START +`), and page usage patched accordingly.
+- Track rows: bitmask `0x0700`, u2 `track_id+6`, u3 `0xe556`, u4 `0x6a2e`, genre IDs, file-type-aware bitrate; artist/album index_shift aligned with the reference.
+- Tables: columns table expanded to 27 UTF-16 annotated entries matching the valid export; genres table now populated from track metadata.
+- Latest export targeting only REKORDBOX1/REKORDBOX2 playlists (10 tracks) lives at `/tmp/pioneer_test` and parses cleanly with rekordcrate (2 track pages: header + 10-row data).
 
-1. **Page numbering** - Table pointers pointed to wrong pages
-2. **Track row structure** - Completely wrong format, field order, and string indices
-3. **Empty string handling** - Offset 0 caused parsing crashes
+### Where we stand
+- **rekordcrate:** ✅ passes on the new `/tmp/pioneer_test` export.  
+- **Hardware:** ❌ still reports “library is corrupted” and shows an empty device browser.  
+- **Likely remaining gap:** page/header details still differ from the reference Rekordbox export; need byte-level comparison against `examples/PIONEER/rekordbox/export.pdb` to finalize (pagination/empty candidates/data-page unknowns/free-space values).
 
-**Current state:**
-- Export generates complete USB structure (Music/, PIONEER/USBANLZ/, PIONEER/rekordbox/)
-- PDB has 5 tables: Artists, Albums, Tracks, PlaylistTree, PlaylistEntries
-- All tables parse successfully with rekordcrate
-- ANLZ stub files generated with valid headers
-- Audio files copied to correct locations
-- Ready for XDJ-XZ hardware test
+### Next steps (not executed here)
+1) Systematically diff our export vs `examples/PIONEER/rekordbox/export.pdb` (page headers, table pointers, row offsets, free/used sizes).  
+2) Match empty-candidate pages / multi-page chains and data-page unknowns/free-space to the reference.  
+3) Re-test on hardware after the above alignment.
 
 ### Validation Status
 

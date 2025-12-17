@@ -1,7 +1,9 @@
 //! USB file organization and structure
 
 use anyhow::{Context, Result};
-use std::fs;
+use binrw::BinWrite;
+use std::fs::{self, File};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 /// Manages Pioneer USB directory structure
@@ -15,8 +17,32 @@ pub struct UsbOrganizer {
     /// PIONEER/USBANLZ directory
     usbanlz_dir: PathBuf,
 
-    /// Music files directory (we'll put music in a Music/ folder)
-    music_dir: PathBuf,
+    /// Contents directory (where rekordbox puts audio files)
+    contents_dir: PathBuf,
+}
+
+/// Compute ANLZ path components from a file path
+/// Returns (p_value, hash_value) for the hierarchical path structure
+/// Path format: /PIONEER/USBANLZ/P{XXX}/{XXXXXXXX}/ANLZ0000.{ext}
+fn compute_anlz_path_hash(file_path: &str) -> (u16, u32) {
+    // Use a simple but deterministic hash based on the file path
+    // This doesn't need to match Rekordbox exactly, just needs to be consistent
+    let bytes = file_path.as_bytes();
+
+    // Compute a 32-bit hash using FNV-1a algorithm
+    let mut hash: u32 = 0x811c9dc5; // FNV offset basis
+    for &byte in bytes {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193); // FNV prime
+    }
+
+    // P value: use upper 12 bits, masked to 3 hex digits (0x000-0xFFF)
+    let p_value = ((hash >> 20) & 0xFFF) as u16;
+
+    // Hash value: use lower 24 bits, extended to 8 hex digits
+    let hash_value = hash & 0x00FFFFFF;
+
+    (p_value, hash_value)
 }
 
 impl UsbOrganizer {
@@ -24,13 +50,13 @@ impl UsbOrganizer {
     pub fn new(usb_root: PathBuf) -> Result<Self> {
         let rekordbox_dir = usb_root.join("PIONEER").join("rekordbox");
         let usbanlz_dir = usb_root.join("PIONEER").join("USBANLZ");
-        let music_dir = usb_root.join("Music");
+        let contents_dir = usb_root.join("Contents");
 
         Ok(Self {
             usb_root,
             rekordbox_dir,
             usbanlz_dir,
-            music_dir,
+            contents_dir,
         })
     }
 
@@ -44,10 +70,71 @@ impl UsbOrganizer {
         fs::create_dir_all(&self.usbanlz_dir)
             .context("Failed to create PIONEER/USBANLZ directory")?;
 
-        fs::create_dir_all(&self.music_dir)
-            .context("Failed to create Music directory")?;
+        fs::create_dir_all(&self.contents_dir)
+            .context("Failed to create Contents directory")?;
+
+        // Write setting files required by Pioneer hardware
+        self.write_setting_files()?;
 
         log::info!("USB directory structure created at {:?}", self.usb_root);
+        Ok(())
+    }
+
+    /// Write the setting files required by Pioneer hardware
+    fn write_setting_files(&self) -> Result<()> {
+        use rekordcrate::setting::Setting;
+
+        let pioneer_dir = self.usb_root.join("PIONEER");
+
+        // DEVSETTING.DAT
+        let devsetting_path = pioneer_dir.join("DEVSETTING.DAT");
+        let devsetting = Setting::default_devsetting();
+        let file = File::create(&devsetting_path)
+            .with_context(|| format!("Failed to create {:?}", devsetting_path))?;
+        let mut writer = BufWriter::new(file);
+        devsetting
+            .write_le(&mut writer)
+            .with_context(|| "Failed to write DEVSETTING.DAT")?;
+        log::debug!("Written DEVSETTING.DAT");
+
+        // MYSETTING.DAT
+        let mysetting_path = pioneer_dir.join("MYSETTING.DAT");
+        let mysetting = Setting::default_mysetting();
+        let file = File::create(&mysetting_path)
+            .with_context(|| format!("Failed to create {:?}", mysetting_path))?;
+        let mut writer = BufWriter::new(file);
+        mysetting
+            .write_le(&mut writer)
+            .with_context(|| "Failed to write MYSETTING.DAT")?;
+        log::debug!("Written MYSETTING.DAT");
+
+        // MYSETTING2.DAT
+        let mysetting2_path = pioneer_dir.join("MYSETTING2.DAT");
+        let mysetting2 = Setting::default_mysetting2();
+        let file = File::create(&mysetting2_path)
+            .with_context(|| format!("Failed to create {:?}", mysetting2_path))?;
+        let mut writer = BufWriter::new(file);
+        mysetting2
+            .write_le(&mut writer)
+            .with_context(|| "Failed to write MYSETTING2.DAT")?;
+        log::debug!("Written MYSETTING2.DAT");
+
+        // djprofile.nxs - DJ profile file required by Pioneer hardware
+        let djprofile_path = pioneer_dir.join("djprofile.nxs");
+        let mut djprofile_data = vec![0u8; 160];
+        // Header bytes from reference (first 32 bytes)
+        djprofile_data[0..4].copy_from_slice(&[0x00, 0x1e, 0x8c, 0x3c]);
+        djprofile_data[4..8].copy_from_slice(&[0x00, 0x00, 0x01, 0x70]);
+        djprofile_data[8..12].copy_from_slice(&[0xa1, 0x75, 0x29, 0x0f]);
+        // Zeros from 12-29
+        djprofile_data[30..32].copy_from_slice(&[0xde, 0x01]);
+        // Profile name at offset 32 (padded to fill rest)
+        let name = b"Pioneer Export";
+        djprofile_data[32..32 + name.len()].copy_from_slice(name);
+        fs::write(&djprofile_path, &djprofile_data)
+            .with_context(|| "Failed to write djprofile.nxs")?;
+        log::debug!("Written djprofile.nxs");
+
         Ok(())
     }
 
@@ -56,14 +143,26 @@ impl UsbOrganizer {
         self.rekordbox_dir.join("export.pdb")
     }
 
-    /// Get the path for an ANLZ file for a given track ID
+    /// Get the path for the exportExt.pdb file
+    pub fn pdb_ext_path(&self) -> PathBuf {
+        self.rekordbox_dir.join("exportExt.pdb")
+    }
+
+    /// Get the path for an ANLZ file using hierarchical structure
     ///
-    /// Pioneer's ANLZ file naming: ANLZnnnn.DAT and ANLZnnnn.EXT
-    /// where nnnn is typically a hash or sequential number
-    pub fn anlz_path(&self, track_id: &str, extension: &str) -> PathBuf {
-        // Use first 8 chars of track ID for ANLZ filename
-        let anlz_name = format!("ANLZ{}", &track_id[..8.min(track_id.len())]);
-        self.usbanlz_dir.join(format!("{}.{}", anlz_name, extension))
+    /// Pioneer's ANLZ file structure: /PIONEER/USBANLZ/P{XXX}/{XXXXXXXX}/ANLZ0000.{ext}
+    /// where P{XXX} and {XXXXXXXX} are derived from the audio file path
+    pub fn anlz_path(&self, audio_path: &str, extension: &str) -> PathBuf {
+        let (p_value, hash_value) = compute_anlz_path_hash(audio_path);
+
+        // Format: P{XXX}/{XXXXXXXX}/ANLZ0000.{ext}
+        let p_dir = format!("P{:03X}", p_value);
+        let hash_dir = format!("{:08X}", hash_value);
+
+        self.usbanlz_dir
+            .join(p_dir)
+            .join(hash_dir)
+            .join(format!("ANLZ0000.{}", extension))
     }
 
     /// Get the destination path for a music file
@@ -75,9 +174,9 @@ impl UsbOrganizer {
             .file_name()
             .unwrap_or_else(|| original_path.as_os_str());
 
-        // For now, put all music files in a flat Music/ directory
-        // Future: could organize by artist/album
-        self.music_dir.join(filename)
+        // For now, put all music files in a flat Contents/ directory
+        // Future: could organize by artist/album like rekordbox does
+        self.contents_dir.join(filename)
     }
 
     /// Copy a music file to the USB
@@ -94,14 +193,22 @@ impl UsbOrganizer {
 
     /// Get the relative path of a music file from the USB root
     /// This is what goes in the PDB file_path field
+    /// Paths must start with / for Pioneer compatibility
     pub fn relative_music_path(&self, absolute_path: &Path) -> Option<PathBuf> {
-        absolute_path.strip_prefix(&self.usb_root).ok().map(|p| p.to_path_buf())
+        absolute_path.strip_prefix(&self.usb_root).ok().map(|p| {
+            // Pioneer paths must start with /
+            PathBuf::from("/").join(p)
+        })
     }
 
     /// Get the relative path for an ANLZ file from USB root
     /// This is what goes in the PDB analyze_path field
-    pub fn relative_anlz_path(&self, track_id: &str, extension: &str) -> Option<PathBuf> {
-        let anlz_abs = self.anlz_path(track_id, extension);
-        anlz_abs.strip_prefix(&self.usb_root).ok().map(|p| p.to_path_buf())
+    /// Paths must start with / for Pioneer compatibility
+    pub fn relative_anlz_path(&self, audio_path: &str, extension: &str) -> Option<PathBuf> {
+        let anlz_abs = self.anlz_path(audio_path, extension);
+        anlz_abs.strip_prefix(&self.usb_root).ok().map(|p| {
+            // Pioneer paths must start with /
+            PathBuf::from("/").join(p)
+        })
     }
 }

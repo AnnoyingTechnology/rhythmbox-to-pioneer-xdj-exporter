@@ -155,13 +155,21 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
                 .get(&track.id)
                 .context("Missing analysis result for track")?;
 
-            // Write .DAT file
-            let dat_path = self.organizer.anlz_path(&track.id, "DAT");
-            crate::anlz::write_dat_file(&dat_path, track, analysis)?;
+            // Compute the relative audio path for the PPTH section and ANLZ path hash
+            let music_path = self.organizer.music_file_path(&track.file_path);
+            let relative_music_path = self
+                .organizer
+                .relative_music_path(&music_path)
+                .context("Failed to compute relative music path")?;
+            let audio_path_str = relative_music_path.to_string_lossy();
+
+            // Write .DAT file (uses audio_path for hierarchical directory structure)
+            let dat_path = self.organizer.anlz_path(&audio_path_str, "DAT");
+            crate::anlz::write_dat_file(&dat_path, track, analysis, &audio_path_str)?;
 
             // Write .EXT file
-            let ext_path = self.organizer.anlz_path(&track.id, "EXT");
-            crate::anlz::write_ext_file(&ext_path, track, analysis)?;
+            let ext_path = self.organizer.anlz_path(&audio_path_str, "EXT");
+            crate::anlz::write_ext_file(&ext_path, track, analysis, &audio_path_str)?;
         }
 
         log::info!("ANLZ files written");
@@ -187,9 +195,11 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
                 .relative_music_path(&music_path)
                 .context("Failed to compute relative music path")?;
 
+            // Use the relative music path for ANLZ path computation (hierarchical structure)
+            let audio_path_str = relative_music_path.to_string_lossy();
             let relative_anlz_path = self
                 .organizer
-                .relative_anlz_path(&track.id, "DAT")
+                .relative_anlz_path(&audio_path_str, "DAT")
                 .context("Failed to compute relative ANLZ path")?;
 
             let analysis = analysis_results
@@ -207,6 +217,12 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
         crate::pdb::write_pdb(&pdb_path, &track_metadata, library.playlists())?;
 
         log::info!("PDB file written to: {:?}", pdb_path);
+
+        // Write exportExt.pdb (extended database required by some Pioneer hardware)
+        let pdb_ext_path = self.organizer.pdb_ext_path();
+        crate::pdb::write_pdb_ext(&pdb_ext_path)?;
+        log::info!("PDB ext file written to: {:?}", pdb_ext_path);
+
         Ok(())
     }
 }

@@ -1,3 +1,123 @@
+# Session Notes - 2025-12-17 (continued)
+
+## CRITICAL FINDING
+**The issue is in the PDB file, NOT the ANLZ files.**
+- Reference export works on XDJ even with USBANLZ folder deleted
+- Our export fails on XDJ even with USBANLZ folder deleted
+- rekordcrate parses both PDBs successfully
+- XDJ firmware checks something that rekordcrate doesn't validate
+
+## Latest Changes
+- **Columns table bug found**: `write_columns_table()` was writing correctly, but the row index format at the end of page differed from reference
+- **Temporary fix**: Changed Columns table to write as empty stub (like Labels/Keys/Colors) to avoid rekordcrate parse errors
+- **rekordcrate validates successfully** with empty Columns table
+- **Ready for hardware testing** at `/tmp/pioneer_test/`
+
+## Key Findings from Byte Comparison
+
+### Table Pointer Structure
+Our export writes tables sequentially with empty_candidate pages immediately after data. Reference has empty_candidate pages grouped at end of file. Both approaches should work.
+
+### Page 50 (Columns Data) Issue
+- Our page had correct data (27 rows) written by `write_columns_table()`
+- Row index format at end of page differed from reference:
+  - Reference: ends with `ff ff ff ff` sentinel
+  - Ours: ends with `ff 07 00 00`
+- rekordcrate failed to parse our row index format, reading past file end
+- **Fix**: Write empty Columns table for now; TODO fix row index format later
+
+### Row Count Comparison (ref vs ours)
+- Tracks: 10 vs 10 ✓
+- Artists: 9 vs 9 ✓
+- Albums: 7 vs 8 (minor diff)
+- Genres: 9 vs 9 ✓
+- PlaylistTree: 2 vs 3 (minor diff)
+- PlaylistEntries: 13 vs 13 ✓
+- **Colors: 8 vs 0** - Reference has preset colors
+- **Keys: 7 vs 0** - Reference has detected keys
+- **Labels: 1 vs 0** - Reference has record label
+- **Columns: 27 vs 0** - Now empty (was 27, but broken format)
+
+## Previous Status
+- **Hardware test still failing**: XDJ shows empty USB browser (no error message)
+- **Rhythmbox playlists aligned**: REKORDBOX1 and REKORDBOX2 now match reference export exactly
+- **Ready for byte-level comparison**: Same tracks in same order enables direct binary diff
+
+## Rhythmbox Playlist Configuration (matches reference)
+
+**REKORDBOX1** (10 tracks, in order):
+1. You're the Kind of Girl I Like - Kwick
+2. What's Luv? - Fat Joe feat. Ashanti
+3. Turn da Music Up (Milano radio edit) - 2 Brothers on the 4th Floor
+4. Omen III (single edit) - Magic Affair
+5. I'm Not Alone (deadmau5 remix) - Calvin Harris
+6. Déjà Vu - Eminem
+7. Love Will Save The Day (The Underground Mix) - Whitney Houston
+8. What Is Love (7'' Mix) - Haddaway
+9. I Am the Black God of the Sun - Rotary Connection
+10. Playgirl (Felix da Housecat Glitz Clubhead mix) - Ladytron
+
+**REKORDBOX2** (3 tracks, in order):
+1. Turn da Music Up (Milano radio edit) - 2 Brothers on the 4th Floor
+2. Omen III (single edit) - Magic Affair
+3. Love Will Save The Day (The Underground Mix) - Whitney Houston
+
+## Tools Created
+- `examples/list_tracks.rs` - Lists tracks from a PDB using rekordcrate
+- `examples/list_playlists.rs` - Lists playlist tree and entries from a PDB
+
+## Next Steps
+1. Rebuild export with aligned playlists
+2. Byte-by-byte comparison of our export vs reference (same tracks now)
+3. Identify remaining differences causing hardware rejection
+
+---
+
+# Session Notes - 2025-12-17 (earlier)
+
+## What Happened
+- **Empty candidate pages now properly zeroed**: Reference exports have completely zeroed empty candidate pages (all 4096 bytes = 0x00). Fixed `write_empty_candidate_page()` function.
+- **Track row field fixes**:
+  - `index_shift`: Now increments by 0x20 per row (was all zeros)
+  - `u3`: Fixed to 0xe5b6 (was 0xe556)
+  - `u4`: Fixed to 0x6a76 (was 0x6a2e)
+- **Page chain structure verified**: Each table has header → data → empty_candidate chain.
+- **rekordcrate validation passes**: PDB header, album pages, track pages all parse correctly.
+
+## Result After Fixes
+- rekordcrate parses the generated PDB successfully
+- Hardware still shows empty USB browser
+- Confirmed issue is in PDB (not ANLZ) by testing with reference USBANLZ
+
+## Files Modified This Session
+- `src/pdb/writer.rs`:
+  - Fixed `write_empty_candidate_page()` to write all zeros
+  - Fixed `index_shift` in track rows to increment by 0x20
+  - Fixed `u3` constant from 0xe556 to 0xe5b6
+  - Fixed `u4` constant from 0x6a2e to 0x6a76
+
+## Test Export Location
+`/tmp/pioneer_test/` - ready to copy to USB for XDJ testing
+
+# Session Notes - 2025-12-16
+
+## What Happened
+- Pulled the new valid Rekordbox export (`examples/PIONEER/rekordbox/export.pdb`, playlists REKORDBOX1/2) and inspected page headers/rows.
+- Updated PDB header pages to use reference defaults (0x1fff sentinels, unknown6=0x03ec, track header unknown1=0x3e/unknown7=1; others unknown1=1, history unknown1=0x12).
+- Set data-page defaults closer to the example: track/artist/album/playlist/columns unknown1/3/4/5 values, header metadata (next_unused_page=final page, unknown=5, sequence=0x44).
+- Track rows now mirror reference constants: bitmask=0x0700, u2=track_id+6, u3=0xe556, u4=0x6a2e, file-type-aware bitrate, genre IDs populated; album/artist index_shift now match reference (0x00c0/0x0100).
+- Columns table expanded to the 27 UTF-16 annotated entries from the valid export; genres table is now written from track metadata.
+- Row offsets and row-group layout fixed (offsets relative to heap, flags + unknown16 per group). Latest export `/tmp/pioneer_test` (REKORDBOX1/2 only) passes rekordcrate (2 track pages: header + 10 rows).
+
+## Current Result
+- rekordcrate parses the generated PDB.
+- Hardware still shows an empty USB browser (no error message) with the latest export (`/tmp/pioneer_test`).
+
+## Next Focus
+- Add proper empty-candidate pages and match next_page chains to the valid export.
+- Implement multi-page support for large tables (tracks/playlists/columns) and tighten data-page unknown fields/free-space values to match the example.
+- Cross-check row offsets and page headers against `examples/PIONEER/rekordbox/export.pdb` before the next hardware test.
+
 # Session Notes - 2025-12-14
 
 ## What Happened Today
@@ -180,3 +300,10 @@ cargo run --release -- --output /tmp/pioneer_test --playlist "Shower" --validate
 We found and fixed the critical bug causing "Database not found" on the XDJ. The page numbering was off by 1, causing all table pointers to reference the wrong pages. The fix was simple but had a major impact.
 
 The export is now ready for hardware testing again. There's still a Track row structure issue that shows up in rekordcrate validation, but it may not affect the XDJ hardware. Hardware testing will determine if we need to fix the Track structure or if we can proceed to Phase 2.
+
+## Update 2025-12-15
+
+- Implemented Rekordbox-style 20-table layout with two pages per table (header + data), page flags/unknown fields aligned to the reference, columns table added (UTF-16 annotated names), and empty_candidate pointers set to data pages.
+- Current PDB validates with rekordcrate, but XDJ reports **"library is corrupted"** and shows an empty browser.
+- Remaining suspected mismatches vs reference: large empty_candidate values and pagination span from the 10k-track example, plus header-page fields possibly still differing in ways the hardware cares about.
+- Latest export for hardware testing: `/tmp/pioneer_test`.

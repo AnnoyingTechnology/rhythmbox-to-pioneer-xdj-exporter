@@ -1,5 +1,28 @@
 # Pioneer Exporter - Phase 1 Status
 
+## Current State (2025-12-17)
+- **Hardware test status**: XDJ still shows empty USB browser (no error message)
+- **Rhythmbox playlists aligned**: REKORDBOX1/REKORDBOX2 now match reference export track order exactly
+- **rekordcrate validation: PASSES** - PDB header, album pages, track pages all parse successfully
+- **Issue confirmed in PDB**: Testing with reference USBANLZ + our PDB still fails
+- Reference Rekordbox export available at `examples/PIONEER/rekordbox/export.pdb` for byte-level comparison
+
+### Recent Fixes Applied
+- Empty candidate pages properly zeroed (all 4096 bytes = 0x00)
+- Track row `index_shift` increments by 0x20 per row
+- Track row `u3` constant: 0xe5b6
+- Track row `u4` constant: 0x6a76
+- Page chain structure: header → data → empty_candidate
+
+### Debugging Tools Added
+- `examples/list_tracks.rs` - Parse and list tracks from PDB via rekordcrate
+- `examples/list_playlists.rs` - Parse and list playlists from PDB via rekordcrate
+
+### Next Steps
+1. Rebuild export with aligned Rhythmbox playlists
+2. Byte-by-byte comparison of our PDB vs reference (same tracks enables direct diff)
+3. Identify remaining field/structure differences causing hardware rejection
+
 ## ✅ COMPLETED
 
 ### Architecture & Foundation
@@ -59,89 +82,24 @@
 - [x] Only minor unused variable warnings (expected for stubs)
 
 ## ⚠️ KNOWN LIMITATIONS (Phase 1)
-
-### PDB File
-1. **Missing critical track fields:**
-   - File path (needed for XDJ-XZ to find audio files)
-   - ANLZ path (analyze_path field - links to waveform/beatgrid)
-   - BPM field
-   - Key field
-   - Other metadata: bitrate, sample rate, comment, genre
-
-2. **Row structure simplified:**
-   - Real track rows have 21 string offset pointers
-   - Real rows have complex offset-based field layout
-   - Phase 1 uses simplified inline data
-
-3. **Single-page limitation:**
-   - Each table limited to one page (~100 rows max)
-   - No multi-page support yet
-
-### ANLZ Files
-- Empty stub files (just headers)
-- No waveform data
-- No beatgrid data
-- XDJ-XZ may reject empty ANLZ files
-
-### Rhythmbox Parsing
-- Playlist parsing incomplete (XML structure not fully handled)
-- No playlist folder support
+- Hardware still reports **“library is corrupted”**; device browser remains empty.
+- Table pagination still single-page (header+data only); no empty-candidate pages or multi-page chains for large libraries.
+- Data-page unknown fields/next_page chaining are only matched approximately; free/used space metrics may still differ from the reference export.
+- Labels/keys/colors/history tables are stubbed; ANLZ files remain minimal headers (no waveforms/beatgrids).
+- Track bitrate defaults are best-effort (MP3→320kbps, others→0) and may diverge from actual media metadata.
 
 ## 🔧 NEXT STEPS (Critical for Phase 1 to work)
-
-### Priority 1: Complete PDB Track Table
-The track table needs these critical fields for XDJ-XZ to work:
-
-```rust
-// Current track row: ID + artist_id + album_id + duration + title (inline)
-// Needed: Proper row structure with string offsets
-
-Track Row (actual format based on Deep Symmetry docs):
-- Row header (subtype, index_shift, ID)
-- Sample rate (u32)
-- Bitrate (u16)
-- Tempo (u16, BPM * 100)
-- Year (u16)
-- String offset array (21 x u16 offsets):
-  [0] = ISRC
-  [1] = Track title
-  [2] = Artist name (or offset to artist table)
-  [3] = Album name (or offset to album table)
-  [4] = Label
-  [5] = Key
-  [6] = Original artist
-  [7] = Remixer
-  [8] = Comment
-  [9] = Mix name
-  [10] = Genre
-  [11] = Album artist
-  [12] = Composer
-  [13] = File path (CRITICAL!)
-  [14] = ANLZ path (CRITICAL!)
-  [15-20] = Other fields
-- String data in heap (referenced by offsets)
-```
-
-**Action:** Refactor `write_tracks_table()` to match actual track row format
-
-### Priority 2: Fix Playlist Parser
-Current playlist parser doesn't actually extract track entries.
-
-**Action:** Complete `src/rhythmbox/playlists.rs` to properly parse `<location>` elements
-
-### Priority 3: Test with Real Data
-Create a test with 1-2 actual music files from Rhythmbox.
-
-**Action:**
-1. Find 1-2 MP3 files in Rhythmbox library
-2. Export to test USB stick
-3. Try loading on XDJ-XZ
-4. Debug failures
-
-### Priority 4: Validation with rekordcrate
-Parse generated PDB with rekordcrate to validate structure.
-
-**Action:** Implement `src/validation/roundtrip.rs`
+1. **Mirror Rekordbox pagination/empty pages**
+   - Add explicit empty-candidate pages per table and match next_page chaining to the valid export.
+   - Support multi-page chains for large tables (tracks/playlists/columns).
+2. **Tighten page header fields**
+   - Align data-page unknown1/3/4/5 values and free/used sizes with the reference export.
+   - Revisit header unknown7 usage (tracks/history) and unknown6 for non-track tables if needed.
+3. **Validate against the new reference export**
+   - Byte-compare page headers and row layouts vs `examples/PIONEER/rekordbox/export.pdb`.
+   - Ensure column/genre IDs referenced by tracks resolve correctly on-device.
+4. **Improve ANLZ stubs (optional)**
+   - Ensure minimal but valid content to avoid rejection (even if waveforms remain empty).
 
 ## 📝 NOTES FOR DEBUGGING
 
@@ -173,6 +131,12 @@ If XDJ-XZ not available for testing:
 - Page 4: Playlist entries table
 
 Each page is exactly 4096 bytes.
+
+## 🆘 Current Blocker (2025-12-17)
+- XDJ shows **empty USB browser** (no error message), even though rekordcrate parses the PDB successfully.
+- Confirmed the issue is in the PDB file (not ANLZ): using reference USBANLZ with our PDB still fails.
+- Rhythmbox playlists now aligned with reference export (same 10 tracks, same order) to enable direct byte-level comparison.
+- Latest hardware test export: `/tmp/pioneer_test` (built with the current writer).
 
 ## 🎯 SUCCESS CRITERIA
 
