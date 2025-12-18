@@ -152,7 +152,7 @@ pub fn write_pdb(
                     0x03ec,
                     0x0001,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), TableType::Tracks)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 // First track data page points to the second track page
@@ -202,7 +202,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -228,7 +228,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -254,7 +254,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -280,7 +280,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -306,7 +306,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -332,7 +332,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -358,7 +358,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -384,7 +384,7 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -410,7 +410,7 @@ pub fn write_pdb(
                     0x03ec,
                     0x0001,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
@@ -447,7 +447,7 @@ pub fn write_pdb(
                 )?;
                 // For tables with no data pages, use None for first_data_page
                 let first_data_page = layout.data_pages.get(0).copied();
-                write_header_page_content(&mut file, layout.header_page, first_data_page)?;
+                write_header_page_content(&mut file, layout.header_page, first_data_page, layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 if let Some(&data_page) = layout.data_pages.get(0) {
@@ -929,16 +929,17 @@ fn write_empty_candidate_page(file: &mut File, page_index: u32) -> Result<()> {
 
 /// Write the header page content that appears after the 40-byte page header
 /// This structure is present in all Rekordbox header pages and contains pointers
-fn write_header_page_content(file: &mut File, header_page: u32, first_data_page: Option<u32>) -> Result<()> {
+fn write_header_page_content(file: &mut File, header_page: u32, first_data_page: Option<u32>, table_type: TableType) -> Result<()> {
     // Position is at 0x28 (right after page header)
     // Structure observed in reference export:
     // +0x00: u32 header_page (this page index)
     // +0x04: u32 first_data_page (or 0x03ffffff if no data)
     // +0x08: u32 sentinel (0x03ffffff)
     // +0x0c: u32 zero
-    // +0x10: u32 zero (but first u16 could be row count or similar)
-    // +0x14: u32 0x1ffff8ff (repeated to fill pattern)
+    // +0x10: u32 varies by table type
+    // +0x14: u32 0x1ffff8ff (repeated to fill pattern) or special for History
     // Note: page 1 (Tracks) has 0x00000000 at +0x10, other pages have 0x1fff0000
+    // History (page 39) has special values: 01 00 ff 1f 40 01 00 00
 
     file.write_all(&header_page.to_le_bytes())?;
     let data_page = first_data_page.unwrap_or(0x03ff_ffff);
@@ -946,21 +947,44 @@ fn write_header_page_content(file: &mut File, header_page: u32, first_data_page:
     file.write_all(&0x03ff_ffffu32.to_le_bytes())?;
     file.write_all(&0u32.to_le_bytes())?;
 
-    // Page 1 (Tracks) has different pattern: 00 00 00 00 followed by f8 ff ff 1f
-    // Other pages have: 00 00 ff 1f followed by f8 ff ff 1f
-    if header_page == 1 {
-        file.write_all(&0u32.to_le_bytes())?;
-    } else {
-        file.write_all(&0x1fff_0000u32.to_le_bytes())?;
+    // Different patterns for different table types
+    match table_type {
+        TableType::Tracks => {
+            // Tracks (page 1): 00 00 00 00
+            file.write_all(&0u32.to_le_bytes())?;
+        }
+        TableType::History => {
+            // History (page 39): 01 00 ff 1f 40 01 00 00 (special 8-byte sequence)
+            file.write_all(&[0x01, 0x00, 0xff, 0x1f])?;
+            file.write_all(&[0x40, 0x01, 0x00, 0x00])?;
+            // Then continue with pattern (but we already wrote 8 extra bytes)
+            let pattern: [u8; 4] = [0xf8, 0xff, 0xff, 0x1f];
+            let remaining_bytes = PAGE_SIZE as usize - 0x28 - 24; // 24 bytes written above
+            let pattern_fill_bytes = remaining_bytes - 20; // Leave last 20 bytes as zeros
+            let pattern_count = pattern_fill_bytes / 4;
+            for _ in 0..pattern_count {
+                file.write_all(&pattern)?;
+            }
+            file.write_all(&[0u8; 20])?;
+            return Ok(());
+        }
+        _ => {
+            // Other pages: 00 00 ff 1f
+            file.write_all(&0x1fff_0000u32.to_le_bytes())?;
+        }
     }
 
     // Fill remaining with the pattern 0x1ffff8ff (f8 ff ff 1f in little endian)
+    // But leave the last 20 bytes as zeros (observed in reference: pattern ends at 0xfec, zeros from 0xfec to 0xfff)
     let pattern: [u8; 4] = [0xf8, 0xff, 0xff, 0x1f]; // Exact bytes from reference
     let remaining_bytes = PAGE_SIZE as usize - 0x28 - 20; // 20 bytes written above
-    let pattern_count = remaining_bytes / 4;
+    let pattern_fill_bytes = remaining_bytes - 20; // Leave last 20 bytes as zeros
+    let pattern_count = pattern_fill_bytes / 4;
     for _ in 0..pattern_count {
         file.write_all(&pattern)?;
     }
+    // Write 20 trailing zeros
+    file.write_all(&[0u8; 20])?;
 
     Ok(())
 }
@@ -970,7 +994,7 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
     log::debug!("Writing genres table: {} genres", genres.len());
 
     let num_rows_small = genres.len().min(0xff) as u8;
-    let num_rows_large = genres.len().min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1023,7 +1047,7 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
     log::debug!("Writing artists table: {} artists", artists.len());
 
     let num_rows_small = artists.len().min(0xff) as u8;
-    let num_rows_large = artists.len().min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1103,7 +1127,7 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
     log::debug!("Writing albums table: {} albums", albums.len());
 
     let num_rows_small = albums.len().min(0xff) as u8;
-    let num_rows_large = albums.len().min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1236,7 +1260,7 @@ fn write_tracks_table(
     log::debug!("Writing tracks table: {} tracks", tracks.len());
 
     let num_rows_small = tracks.len().min(0xff) as u8;
-    let num_rows_large = tracks.len().min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1484,7 +1508,7 @@ fn write_playlist_tree_table(file: &mut File, playlists: &[Playlist], page_index
     // No ROOT folder - playlists sit directly at root level (parent_id=0)
     let num_rows = playlists.len() as u32;
     let num_rows_small = num_rows.min(0xff) as u8;
-    let num_rows_large = num_rows.min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
     write_page_header(
         file,
         page_index,
@@ -1560,7 +1584,7 @@ fn write_playlist_entries_table(
     // Count total entries
     let total_entries: usize = playlists.iter().map(|p| p.entries.len()).sum();
     let num_rows_small = total_entries.min(0xff) as u8;
-    let num_rows_large = total_entries.min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
 
     log::debug!("Writing playlist entries table: {} entries", total_entries);
 
@@ -1652,7 +1676,7 @@ fn write_colors_table(file: &mut File, page_index: u32, next_page: u32) -> Resul
 
     let num_rows = colors.len();
     let num_rows_small = num_rows.min(0xff) as u8;
-    let num_rows_large = num_rows.min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1713,7 +1737,7 @@ fn write_columns_table(file: &mut File, columns: &[ColumnEntry], page_index: u32
     log::debug!("Writing columns table: {} entries", columns.len());
 
     let num_rows_small = columns.len().min(0xff) as u8;
-    let num_rows_large = columns.len().min(0xffff) as u16;
+    let num_rows_large = 0u16; // Reference often has 0
 
     let page_start = file.stream_position()?;
     write_page_header(
