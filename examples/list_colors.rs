@@ -11,16 +11,23 @@ fn main() {
     let header = Header::read(&mut file).expect("Failed to read header");
 
     println!("=== Colors Table ===\n");
-    if let Some(table) = header.tables.iter()
-        .find(|t| matches!(t.page_type, PageType::Colors)) {
-        
-        println!("First page: {:?}, Last page: {:?}", table.first_page, table.last_page);
-        
-        let pages = header.read_pages(
-            &mut file,
-            binrw::Endian::Little,
-            (&table.first_page, &table.last_page),
-        ).expect("Failed to read colors pages");
+    if let Some(table) = header
+        .tables
+        .iter()
+        .find(|t| matches!(t.page_type, PageType::Colors))
+    {
+        println!(
+            "First page: {:?}, Last page: {:?}",
+            table.first_page, table.last_page
+        );
+
+        let pages = header
+            .read_pages(
+                &mut file,
+                binrw::Endian::Little,
+                (&table.first_page, &table.last_page),
+            )
+            .expect("Failed to read colors pages");
 
         for page in pages {
             println!("Page has {} row groups", page.row_groups.len());

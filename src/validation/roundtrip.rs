@@ -22,7 +22,10 @@ pub fn validate_export(usb_path: &Path) -> Result<()> {
     } else if usb_path.join("rekordbox/export.pdb").exists() {
         usb_path.join("rekordbox/export.pdb")
     } else {
-        anyhow::bail!("PDB file not found at: {:?}", usb_path.join("PIONEER/rekordbox/export.pdb"));
+        anyhow::bail!(
+            "PDB file not found at: {:?}",
+            usb_path.join("PIONEER/rekordbox/export.pdb")
+        );
     };
 
     log::info!("Found PDB at: {:?}", pdb_path);
@@ -35,8 +38,8 @@ pub fn validate_export(usb_path: &Path) -> Result<()> {
     // Open and parse the PDB with rekordcrate
     log::info!("Attempting to parse PDB with rekordcrate...");
 
-    let mut file = File::open(&pdb_path)
-        .with_context(|| format!("Failed to open PDB: {:?}", pdb_path))?;
+    let mut file =
+        File::open(&pdb_path).with_context(|| format!("Failed to open PDB: {:?}", pdb_path))?;
 
     match Header::read(&mut file) {
         Ok(header) => {
@@ -56,7 +59,11 @@ pub fn validate_export(usb_path: &Path) -> Result<()> {
             }
 
             // Try to read pages from the album table first
-            if let Some(album_table) = header.tables.iter().find(|t| matches!(t.page_type, rekordcrate::pdb::PageType::Albums)) {
+            if let Some(album_table) = header
+                .tables
+                .iter()
+                .find(|t| matches!(t.page_type, rekordcrate::pdb::PageType::Albums))
+            {
                 log::info!("Attempting to read album pages...");
                 match header.read_pages(
                     &mut file,
@@ -78,7 +85,11 @@ pub fn validate_export(usb_path: &Path) -> Result<()> {
             }
 
             // Try to read pages from the track table
-            if let Some(track_table) = header.tables.iter().find(|t| matches!(t.page_type, rekordcrate::pdb::PageType::Tracks)) {
+            if let Some(track_table) = header
+                .tables
+                .iter()
+                .find(|t| matches!(t.page_type, rekordcrate::pdb::PageType::Tracks))
+            {
                 log::info!("Attempting to read track pages...");
                 match header.read_pages(
                     &mut file,

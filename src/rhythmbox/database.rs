@@ -31,9 +31,7 @@ pub fn parse_database(path: &Path) -> Result<Vec<Track>> {
                         // Check if this is a song entry (type="song")
                         for attr in e.attributes() {
                             if let Ok(attr) = attr {
-                                if attr.key.as_ref() == b"type"
-                                    && attr.value.as_ref() == b"song"
-                                {
+                                if attr.key.as_ref() == b"type" && attr.value.as_ref() == b"song" {
                                     current_entry = Some(RhythmboxEntry::new());
                                     break;
                                 }
@@ -108,7 +106,11 @@ pub fn parse_database(path: &Path) -> Result<Vec<Track>> {
 
             Ok(Event::Eof) => break,
             Err(e) => {
-                log::warn!("XML parsing error at position {}: {:?}", reader.buffer_position(), e);
+                log::warn!(
+                    "XML parsing error at position {}: {:?}",
+                    reader.buffer_position(),
+                    e
+                );
             }
             _ => {}
         }
@@ -135,8 +137,14 @@ fn convert_entry_to_track(entry: &RhythmboxEntry) -> Option<Track> {
     Some(Track {
         id,
         title,
-        artist: entry.artist.clone().unwrap_or_else(|| "Unknown Artist".to_string()),
-        album: entry.album.clone().unwrap_or_else(|| "Unknown Album".to_string()),
+        artist: entry
+            .artist
+            .clone()
+            .unwrap_or_else(|| "Unknown Artist".to_string()),
+        album: entry
+            .album
+            .clone()
+            .unwrap_or_else(|| "Unknown Album".to_string()),
         genre: entry.genre.clone(),
         duration_ms: entry.duration.unwrap_or(0) * 1000, // Convert seconds to ms
         bpm: entry.bpm,

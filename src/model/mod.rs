@@ -3,10 +3,10 @@
 //! This module defines data structures that are independent of
 //! both input (Rhythmbox) and output (Pioneer) formats.
 
-mod track;
-mod playlist;
 mod library;
+mod playlist;
+mod track;
 
-pub use track::{Track, MusicalKey};
-pub use playlist::{Playlist, PlaylistEntry};
 pub use library::Library;
+pub use playlist::{Playlist, PlaylistEntry};
+pub use track::{MusicalKey, Track};

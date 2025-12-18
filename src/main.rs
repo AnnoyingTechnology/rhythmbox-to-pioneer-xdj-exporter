@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use pioneer_exporter::{ExportConfig, ExportPipeline};
 use pioneer_exporter::analysis::StubAnalyzer;
 use pioneer_exporter::validation::validate_export;
+use pioneer_exporter::{ExportConfig, ExportPipeline};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -10,11 +10,19 @@ use std::path::PathBuf;
 #[command(about = "Export Rhythmbox library to Pioneer USB format", long_about = None)]
 struct Args {
     /// Path to Rhythmbox database (rhythmdb.xml)
-    #[arg(short = 'd', long, default_value = "~/.local/share/rhythmbox/rhythmdb.xml")]
+    #[arg(
+        short = 'd',
+        long,
+        default_value = "~/.local/share/rhythmbox/rhythmdb.xml"
+    )]
     database: String,
 
     /// Path to Rhythmbox playlists (playlists.xml)
-    #[arg(short = 'p', long, default_value = "~/.local/share/rhythmbox/playlists.xml")]
+    #[arg(
+        short = 'p',
+        long,
+        default_value = "~/.local/share/rhythmbox/playlists.xml"
+    )]
     playlists: String,
 
     /// Target USB mount point
@@ -63,7 +71,8 @@ fn main() -> Result<()> {
         PathBuf::from(playlists_path.as_ref()).as_path(),
     )?;
 
-    log::info!("Library loaded: {} tracks, {} playlists",
+    log::info!(
+        "Library loaded: {} tracks, {} playlists",
         library.track_count(),
         library.playlist_count()
     );
@@ -73,7 +82,11 @@ fn main() -> Result<()> {
 
     // Apply playlist filter if specified
     if !args.playlists_filter.is_empty() {
-        log::info!("Filtering to {} playlist(s): {:?}", args.playlists_filter.len(), args.playlists_filter);
+        log::info!(
+            "Filtering to {} playlist(s): {:?}",
+            args.playlists_filter.len(),
+            args.playlists_filter
+        );
         config = config.with_playlists(args.playlists_filter);
     }
 

@@ -39,6 +39,33 @@ This document describes the phased implementation approach for the Rhythmbox →
 2) Match empty-candidate pages / multi-page chains and data-page unknowns/free-space to the reference.  
 3) Re-test on hardware after the above alignment.
 
+## 2025-12-17 Update (WIP attempt to unblock hardware)
+- Populated **Columns**, **Keys**, **Labels**, and **Colors** tables to mirror the reference contents and ordering (27 columns, 7 keys, 1 label, 8 preset colors). Columns now use the annotated UTF-16 format; colors/key/label tables have reference-like header values and row structures.
+- Regenerated export at `/tmp/pioneer_test` with REKORDBOX1/2 (10 tracks). The standard roundtrip validation still passes (rekordcrate parses header/tracks/albums/playlists).
+- The `examples/list_columns.rs` helper still panics on the new PDB (rekordcrate error while parsing ColumnEntry), so the columns page layout is still not byte-identical to the reference despite populated rows. Column header free/used sizes now use page-size-based accounting, but the row index format likely still diverges (missing sentinel or wrong index layout).
+- Table layout remains **sequential** (header→data→empty per table with contiguous page indices) rather than the spaced/gapped layout of the reference; this likely remains a blocker for the XDJ even with populated tables.
+- Track field gaps remain (tempo/year/date fields not aligned to the reference; BPM often zero from Rhythmbox data), and pagination is still single-chain (tracks split across 2 pages but not placed at reference indices).
+
+### What to test next
+- Fix the Columns page row index to match the reference (ensure rekordcrate list_columns succeeds on our PDB). Compare our columns data page against `examples/PIONEER/rekordbox/export.pdb` (page_index 34) for row index layout and free/used sizes.
+- Rework table pagination to mirror the reference pointer map (non-contiguous page indices, shared empty-candidate region) and copy data-page header unknowns/free/used from the reference per table type.
+- Populate tempo/year/date fields for tracks (BPM*100, sane years, date_added/analyze_date strings) to remove remaining per-row divergences.
+- Re-test on hardware once columns parse cleanly and page layout matches the reference.
+
+## 2025-12-18 Update (columns + layout implementation)
+- `write_pdb` now hard-codes the reference pointer map: headers/data/empty pages are written to the same indices as `examples/PIONEER/rekordbox/export.pdb` (tracks h=1 d=2/51 empty=55; genres h=3 d=4 empty=48; artists h=5 d=6 empty=47; albums h=7 d=8 empty=49; labels h=9 d=10 empty=54; keys h=11 d=12 empty=50; colors h=13 d=14 empty=42; playlistTree h=15 d=16 empty=46; playlistEntries h=17 d=18 empty=52; unknown09 h=19 empty=20; unknown0A h=21 empty=22; unknown0B h=23 empty=24; unknown0C h=25 empty=26; artwork h=27 d=28 empty=53; unknown0E h=29 empty=30; unknown0F h=31 empty=32; columns h=33 d=34 empty=43; historyPlaylists h=35 d=36 empty=44; historyEntries h=37 d=38 empty=45; history h=39 d=40 empty=41). Header metadata now patches `next_unused_page=56` and explicitly zeros the empty-candidate pages. Tracks are split across page 2 and 51 with per-page unknown1 values 0x0038 (page 2) and 0x003e (page 51).
+- Row-group layout was rewritten to align with rekordcrate: row groups are always 36 bytes (16 offsets + flags + unknown). `used_size` now records only the heap length (no `HEAP_START` bias), `free_size` uses page-padding math, and columns/colors use unknown=flags. Track row groups use a small heuristic (flags count → unknown) to mirror the reference (page 2 unknown=0x80, page 51 unknown=0x01 for a single row). Colors data page header fields now match the reference (unk1=0x0002, unk3=0x00, unk4=0x01, unk5=0x0008).
+- Rekordcrate parsing check: `cargo run --example list_columns examples/PIONEER/rekordbox/export.pdb` now succeeds (columns table prints 27 rows; no panic), confirming the row-group sizing logic matches the parser expectations.
+- Not yet re-exported with Rhythmbox data or hardware-tested due to missing library inputs in this session. The new layout presizes the file to 56 pages; hardware validation still needed. Tempo/year/date field gaps remain untouched.
+- Pending follow-ups: regenerate an export with the new writer, diff free/used sizes vs reference (columns free_size now computed from padding and may differ by ~10 bytes from the reference 0x0cca), and run hardware/XDJ validation. Track unknown row-group values remain heuristic; adjust if hardware still balks.
+
+### 2025-12-18 Small-library export (REKORDBOX1/2 only)
+- Ran export to `/tmp/pioneer_new` with playlist filters `REKORDBOX1`, `REKORDBOX2` (10 tracks total). Table pointers and next_unused_page match the reference map (headers at the same indices; tracks split across pages 2 and 51; empty_candidate=55).
+- Rekordcrate validation passes on this export, but it is **not byte-identical** to the reference: track page used/free differ (page 2 used=0x0ad6 vs ref 0x0f80; page 51 used=0x0150 vs ref 0x01c0), genres/artists/albums used sizes are smaller than reference, playlistEntries rows_l=0x000d vs ref 0x000c, colors page used/free differ (0x006e/0x0f46 vs ref 0x007c/0x0f48), columns page used/free differ (0x02b4/0x0cdc vs ref 0x02d0/0x0cca).
+- Keys, Labels, and Artwork tables are empty (used=0) in the new export, while the reference has populated rows (Keys used≈0x54, Labels used≈0x14, Artwork used≈0x48). These remain gaps to close.
+- The export pipeline still writes `PIONEER/USBANLZ/*.DAT`/`.EXT`, `PIONEER/rekordbox/*.nxs`, and `exportExt.pdb` by default. Earlier hardware tests showed these are not required; consider gating or skipping their generation for final hardware runs.
+- Next steps: adjust track page layout/free/used to match reference, populate Keys/Labels/Artwork to reference contents, align playlistEntries row count, and re-diff columns/colors free/used before retrying on hardware.
+
 ### Validation Status
 
 **rekordcrate validation: ✅ PASS**

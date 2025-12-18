@@ -78,7 +78,11 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
         // Filter playlists
         for playlist in library.playlists() {
             if playlist_names.contains(&playlist.name) {
-                log::info!("Including playlist: {} ({} tracks)", playlist.name, playlist.len());
+                log::info!(
+                    "Including playlist: {} ({} tracks)",
+                    playlist.name,
+                    playlist.len()
+                );
 
                 // Collect track IDs from this playlist
                 for entry in &playlist.entries {

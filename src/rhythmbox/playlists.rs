@@ -46,7 +46,8 @@ pub fn parse_playlists(path: &Path, tracks: &[Track]) -> Result<Vec<Playlist>> {
                             if let Ok(attr) = attr {
                                 match attr.key.as_ref() {
                                     b"name" => {
-                                        playlist_name = String::from_utf8_lossy(&attr.value).to_string();
+                                        playlist_name =
+                                            String::from_utf8_lossy(&attr.value).to_string();
                                     }
                                     b"type" => {
                                         // Skip automatic playlists (we want static playlists)

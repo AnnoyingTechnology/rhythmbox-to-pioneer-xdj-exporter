@@ -113,7 +113,10 @@ fn test_export_creates_directory_structure() {
             assert!(usb_path.join("Music").read_dir().unwrap().count() > 0);
 
             println!("✓ Export completed successfully");
-            println!("  PDB file: {:?}", usb_path.join("PIONEER/rekordbox/export.pdb"));
+            println!(
+                "  PDB file: {:?}",
+                usb_path.join("PIONEER/rekordbox/export.pdb")
+            );
 
             // Check PDB file size (should be reasonable)
             let pdb_metadata = fs::metadata(usb_path.join("PIONEER/rekordbox/export.pdb")).unwrap();

@@ -37,10 +37,7 @@ impl Playlist {
     /// Add a track to this playlist
     pub fn add_track(&mut self, track_id: String) {
         let position = self.entries.len() as u32;
-        self.entries.push(PlaylistEntry {
-            track_id,
-            position,
-        });
+        self.entries.push(PlaylistEntry { track_id, position });
     }
 
     /// Number of tracks in this playlist

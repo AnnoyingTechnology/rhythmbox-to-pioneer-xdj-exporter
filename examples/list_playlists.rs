@@ -13,14 +13,18 @@ fn main() {
 
     // List playlist tree
     println!("=== Playlist Tree ===\n");
-    if let Some(table) = header.tables.iter()
-        .find(|t| matches!(t.page_type, PageType::PlaylistTree)) {
-
-        let pages = header.read_pages(
-            &mut file,
-            binrw::Endian::Little,
-            (&table.first_page, &table.last_page),
-        ).expect("Failed to read playlist tree pages");
+    if let Some(table) = header
+        .tables
+        .iter()
+        .find(|t| matches!(t.page_type, PageType::PlaylistTree))
+    {
+        let pages = header
+            .read_pages(
+                &mut file,
+                binrw::Endian::Little,
+                (&table.first_page, &table.last_page),
+            )
+            .expect("Failed to read playlist tree pages");
 
         for page in pages {
             for row_group in &page.row_groups {
@@ -35,14 +39,18 @@ fn main() {
 
     // List playlist entries
     println!("\n=== Playlist Entries ===\n");
-    if let Some(table) = header.tables.iter()
-        .find(|t| matches!(t.page_type, PageType::PlaylistEntries)) {
-
-        let pages = header.read_pages(
-            &mut file,
-            binrw::Endian::Little,
-            (&table.first_page, &table.last_page),
-        ).expect("Failed to read playlist entries pages");
+    if let Some(table) = header
+        .tables
+        .iter()
+        .find(|t| matches!(t.page_type, PageType::PlaylistEntries))
+    {
+        let pages = header
+            .read_pages(
+                &mut file,
+                binrw::Endian::Little,
+                (&table.first_page, &table.last_page),
+            )
+            .expect("Failed to read playlist entries pages");
 
         for page in pages {
             for row_group in &page.row_groups {

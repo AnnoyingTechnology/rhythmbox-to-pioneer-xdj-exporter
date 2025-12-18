@@ -17,20 +17,25 @@ fn main() {
     println!();
 
     // Find the tracks table
-    let tracks_table = header.tables.iter()
+    let tracks_table = header
+        .tables
+        .iter()
         .find(|t| matches!(t.page_type, PageType::Tracks))
         .expect("No tracks table found");
 
-    println!("Tracks table: first_page={:?}, last_page={:?}",
-             tracks_table.first_page,
-             tracks_table.last_page);
+    println!(
+        "Tracks table: first_page={:?}, last_page={:?}",
+        tracks_table.first_page, tracks_table.last_page
+    );
 
     // Read track pages
-    let pages = header.read_pages(
-        &mut file,
-        binrw::Endian::Little,
-        (&tracks_table.first_page, &tracks_table.last_page),
-    ).expect("Failed to read track pages");
+    let pages = header
+        .read_pages(
+            &mut file,
+            binrw::Endian::Little,
+            (&tracks_table.first_page, &tracks_table.last_page),
+        )
+        .expect("Failed to read track pages");
 
     println!("\nTracks (in file order):");
     println!("{:>4} | Title", "Pos");

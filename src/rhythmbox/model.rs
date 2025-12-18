@@ -10,7 +10,7 @@ pub struct RhythmboxEntry {
     pub album: Option<String>,
     pub genre: Option<String>,
     pub track_number: Option<u32>,
-    pub duration: Option<u32>, // seconds
+    pub duration: Option<u32>,    // seconds
     pub location: Option<String>, // file:// URI
     pub bpm: Option<f32>,
     pub year: Option<u32>,

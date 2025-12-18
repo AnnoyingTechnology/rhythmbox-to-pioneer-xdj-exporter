@@ -11,12 +11,16 @@ fn main() {
     let header = Header::read(&mut file).expect("Failed to read header");
 
     // Find Columns table
-    let columns_table = header.tables.iter()
+    let columns_table = header
+        .tables
+        .iter()
         .find(|t| matches!(t.page_type, PageType::Columns))
         .expect("No Columns table");
 
-    println!("Columns table: first={:?} last={:?}",
-             columns_table.first_page, columns_table.last_page);
+    println!(
+        "Columns table: first={:?} last={:?}",
+        columns_table.first_page, columns_table.last_page
+    );
 
     // Try to read pages
     println!("Attempting to read pages...");

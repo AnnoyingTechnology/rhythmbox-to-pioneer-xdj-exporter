@@ -7,7 +7,7 @@ use crate::analysis::AnalysisResult;
 use crate::model::{Playlist, Track};
 use super::types::{TableType, FileType};
 use super::strings::{encode_device_sql, encode_device_sql_utf16_annotated};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Write, Seek, SeekFrom};
@@ -32,7 +32,14 @@ pub struct TrackMetadata {
 const PAGE_SIZE: u32 = 4096; // Standard 4KB pages
 const HEAP_START: usize = 0x28; // Data starts at byte 40
 
-// Table write order (matches rekordbox exports)
+struct TableLayout {
+    table: TableType,
+    header_page: u32,
+    data_pages: &'static [u32],
+    empty_candidate: u32,
+    last_page: u32,
+}
+
 const TABLE_SEQUENCE: [TableType; 20] = [
     TableType::Tracks,
     TableType::Genres,
@@ -55,6 +62,37 @@ const TABLE_SEQUENCE: [TableType; 20] = [
     TableType::HistoryEntries,
     TableType::History,
 ];
+
+const REFERENCE_NEXT_UNUSED_PAGE: u32 = 56;
+
+const TABLE_LAYOUTS: &[TableLayout] = &[
+    TableLayout { table: TableType::Tracks, header_page: 1, data_pages: &[2, 51], empty_candidate: 55, last_page: 51 },
+    TableLayout { table: TableType::Genres, header_page: 3, data_pages: &[4], empty_candidate: 48, last_page: 4 },
+    TableLayout { table: TableType::Artists, header_page: 5, data_pages: &[6], empty_candidate: 47, last_page: 6 },
+    TableLayout { table: TableType::Albums, header_page: 7, data_pages: &[8], empty_candidate: 49, last_page: 8 },
+    TableLayout { table: TableType::Labels, header_page: 9, data_pages: &[10], empty_candidate: 54, last_page: 10 },
+    TableLayout { table: TableType::Keys, header_page: 11, data_pages: &[12], empty_candidate: 50, last_page: 12 },
+    TableLayout { table: TableType::Colors, header_page: 13, data_pages: &[14], empty_candidate: 42, last_page: 14 },
+    TableLayout { table: TableType::PlaylistTree, header_page: 15, data_pages: &[16], empty_candidate: 46, last_page: 16 },
+    TableLayout { table: TableType::PlaylistEntries, header_page: 17, data_pages: &[18], empty_candidate: 52, last_page: 18 },
+    TableLayout { table: TableType::Unknown09, header_page: 19, data_pages: &[], empty_candidate: 20, last_page: 19 },
+    TableLayout { table: TableType::Unknown0A, header_page: 21, data_pages: &[], empty_candidate: 22, last_page: 21 },
+    TableLayout { table: TableType::Unknown0B, header_page: 23, data_pages: &[], empty_candidate: 24, last_page: 23 },
+    TableLayout { table: TableType::Unknown0C, header_page: 25, data_pages: &[], empty_candidate: 26, last_page: 25 },
+    TableLayout { table: TableType::Artwork, header_page: 27, data_pages: &[28], empty_candidate: 53, last_page: 28 },
+    TableLayout { table: TableType::Unknown0E, header_page: 29, data_pages: &[], empty_candidate: 30, last_page: 29 },
+    TableLayout { table: TableType::Unknown0F, header_page: 31, data_pages: &[], empty_candidate: 32, last_page: 31 },
+    TableLayout { table: TableType::Columns, header_page: 33, data_pages: &[34], empty_candidate: 43, last_page: 34 },
+    TableLayout { table: TableType::HistoryPlaylists, header_page: 35, data_pages: &[36], empty_candidate: 44, last_page: 36 },
+    TableLayout { table: TableType::HistoryEntries, header_page: 37, data_pages: &[38], empty_candidate: 45, last_page: 38 },
+    TableLayout { table: TableType::History, header_page: 39, data_pages: &[40], empty_candidate: 41, last_page: 40 },
+];
+
+fn seek_to_page(file: &mut File, page_index: u32) -> Result<u64> {
+    let offset = page_index as u64 * PAGE_SIZE as u64;
+    file.seek(SeekFrom::Start(offset))?;
+    Ok(offset)
+}
 
 /// Write a complete PDB file
 ///
@@ -84,56 +122,75 @@ pub fn write_pdb(
     // Rekordbox exports include 20 table pointers (0x00-0x13)
     let num_tables = TABLE_SEQUENCE.len() as u32;
 
-    // Write file header
+    // Write file header and pre-size the file so all reference pages exist
     write_file_header(&mut file, num_tables)?;
+    file.set_len((REFERENCE_NEXT_UNUSED_PAGE as u64) * PAGE_SIZE as u64)?;
 
-    // Write tables - each table has: header page, data page, empty candidate page
-    // Page 0 is the file header, table pages start at page 1
-    let mut current_page = 1u32;
-    // Track (table_type, first_page, last_page, empty_candidate) for each table
-    let mut table_pages: Vec<(TableType, u32, u32, u32)> = Vec::with_capacity(TABLE_SEQUENCE.len());
+    // Split tracks across the reference track data pages (page 2 and 51)
+    let first_track_count = tracks.len().min(9);
+    let track_page_one = &tracks[..first_track_count];
+    let track_page_two = &tracks[first_track_count..];
 
-    for table_type in TABLE_SEQUENCE {
-        let header_page = current_page;
-        let data_page = current_page + 1;
-        let empty_page = current_page + 2;  // Empty candidate page after data
-
-        match table_type {
+    for layout in TABLE_LAYOUTS {
+        match layout.table {
             TableType::Tracks => {
-                // Header page (no rows, points to data)
+                // Header page
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
-                    0,            // num_rows_small
-                    0x1fff,       // num_rows_large sentinel
-                    0,            // unknown3
-                    0,            // unknown4
-                    0x64,         // page_flags (header)
-                    0x3e,         // unknown1 (matches reference)
-                    0,            // unknown2
-                    0x1fff,       // unknown5 sentinel
-                    0x03ec,       // unknown6
-                    0x0001,       // unknown7 (tracks header)
+                    layout.header_page,
+                    TableType::Tracks as u32,
+                    layout.data_pages[0],
+                    0,
+                    0x1fff,
+                    0,
+                    0,
+                    0x64,
+                    0x3e,
+                    0,
+                    0x1fff,
+                    0x03ec,
+                    0x0001,
                 )?;
-                // Pad header page to full size
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
-                // Data page points to empty candidate
-                write_tracks_table(&mut file, tracks, &entities, data_page, empty_page)?;
+                // First track data page points to the second track page
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_tracks_table(
+                    &mut file,
+                    track_page_one,
+                    &entities,
+                    layout.data_pages[0],
+                    layout.data_pages.get(1).copied().unwrap_or(layout.empty_candidate),
+                    0x0038,
+                    0x01,
+                )?;
 
-                // Empty candidate page (type 0 = Tracks, no data)
-                write_empty_candidate_page(&mut file)?;
+                // Second track data page (if any rows remain) points to the empty candidate
+                if let Some(&second_page) = layout.data_pages.get(1) {
+                    seek_to_page(&mut file, second_page)?;
+                    write_tracks_table(
+                        &mut file,
+                        track_page_two,
+                        &entities,
+                        second_page,
+                        layout.empty_candidate,
+                        0x003e,
+                        0x00,
+                    )?;
+                }
+
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::Genres => {
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::Genres as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -145,18 +202,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_genres_table(&mut file, &entities.genres, data_page, empty_page)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_genres_table(&mut file, &entities.genres, layout.data_pages[0], layout.empty_candidate)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::Artists => {
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::Artists as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -168,18 +228,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_artists_table(&mut file, &entities.artists, data_page, empty_page)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_artists_table(&mut file, &entities.artists, layout.data_pages[0], layout.empty_candidate)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::Albums => {
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::Albums as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -191,19 +254,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_albums_table(&mut file, &entities, data_page, empty_page)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_albums_table(&mut file, &entities, layout.data_pages[0], layout.empty_candidate)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::Labels | TableType::Keys => {
-                // Empty stub tables for Labels and Keys
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    layout.table as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -215,19 +280,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_blank_page(&mut file, data_page, table_type as u32, empty_page, 0x24)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_blank_page(&mut file, layout.data_pages[0], layout.table as u32, layout.empty_candidate, 0x24)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::Colors => {
-                // Write header page for Colors table
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::Colors as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -239,19 +306,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                // Write Colors data page with 8 preset colors
-                write_colors_table(&mut file, data_page, empty_page)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_colors_table(&mut file, layout.data_pages[0], layout.empty_candidate)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::PlaylistTree => {
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::PlaylistTree as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -263,18 +332,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_playlist_tree_table(&mut file, playlists, data_page, empty_page)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_playlist_tree_table(&mut file, playlists, layout.data_pages[0], layout.empty_candidate)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::PlaylistEntries => {
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::PlaylistEntries as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -286,20 +358,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_playlist_entries_table(&mut file, playlists, &entities.track_ids, data_page, empty_page)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_playlist_entries_table(&mut file, playlists, &entities.track_ids, layout.data_pages[0], layout.empty_candidate)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::Columns => {
-                // Write empty Columns table for now (stub)
-                // TODO: Fix row index format to match reference export
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::Columns as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -311,19 +384,21 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                // Write empty data page instead of columns data
-                write_blank_page(&mut file, data_page, table_type as u32, empty_page, 0x24)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_columns_table(&mut file, &entities.columns, layout.data_pages[0], layout.empty_candidate)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::History => {
+                seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    TableType::History as u32,
+                    layout.data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -335,11 +410,13 @@ pub fn write_pdb(
                     0x03ec,
                     0x0001,
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_blank_page(&mut file, data_page, table_type as u32, empty_page, 0x24)?;
-                write_empty_candidate_page(&mut file)?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]))?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_blank_page(&mut file, layout.data_pages[0], layout.table as u32, layout.empty_candidate, 0x24)?;
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
             TableType::Artwork
             | TableType::HistoryPlaylists
@@ -350,11 +427,13 @@ pub fn write_pdb(
             | TableType::Unknown0C
             | TableType::Unknown0E
             | TableType::Unknown0F => {
+                seek_to_page(&mut file, layout.header_page)?;
+                let next_page = layout.data_pages.get(0).copied().unwrap_or(layout.empty_candidate);
                 write_page_header(
                     &mut file,
-                    header_page,
-                    table_type as u32,
-                    data_page,
+                    layout.header_page,
+                    layout.table as u32,
+                    next_page,
                     0,
                     0x1fff,
                     0,
@@ -364,36 +443,41 @@ pub fn write_pdb(
                     0,
                     0x1fff,
                     0x03ec,
-                    0,
+                    if matches!(layout.table, TableType::HistoryPlaylists | TableType::HistoryEntries) { 0 } else { 0 },
                 )?;
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-                patch_page_usage(&mut file, header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-                write_blank_page(&mut file, data_page, table_type as u32, empty_page, 0x24)?;
-                write_empty_candidate_page(&mut file)?;
+                // For tables with no data pages, use None for first_data_page
+                let first_data_page = layout.data_pages.get(0).copied();
+                write_header_page_content(&mut file, layout.header_page, first_data_page)?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                if let Some(&data_page) = layout.data_pages.get(0) {
+                    seek_to_page(&mut file, data_page)?;
+                    write_blank_page(&mut file, data_page, layout.table as u32, layout.empty_candidate, 0x24)?;
+                }
+
+                seek_to_page(&mut file, layout.empty_candidate)?;
+                write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
         }
-
-        // Now we have: header_page, data_page, empty_page
-        // first_page = header_page, last_page = data_page, empty_candidate = empty_page
-        table_pages.push((table_type, header_page, data_page, empty_page));
-        current_page += 3;  // header + data + empty
     }
 
-    // Go back and write table pointers in header using the recorded pages
+    // Write table pointers back into the header
     file.seek(SeekFrom::Start(0x1c))?;
-    for (table_type, first_page, last_page, empty_candidate) in table_pages {
-        write_table_pointer(&mut file, table_type as u32, empty_candidate, first_page, last_page)?;
+    for layout in TABLE_LAYOUTS {
+        write_table_pointer(
+            &mut file,
+            layout.table as u32,
+            layout.empty_candidate,
+            layout.header_page,
+            layout.last_page,
+        )?;
     }
 
     // Patch header metadata now that we know the final page count
-    let next_unused_page = current_page;
-    let unknown_field = 5u32; // matches reference export header
-    let sequence = 0x44u32; // observed in reference export
     file.seek(SeekFrom::Start(0x0c))?;
-    file.write_all(&next_unused_page.to_le_bytes())?;
-    file.write_all(&unknown_field.to_le_bytes())?;
-    file.write_all(&sequence.to_le_bytes())?;
+    file.write_all(&REFERENCE_NEXT_UNUSED_PAGE.to_le_bytes())?;
+    file.write_all(&5u32.to_le_bytes())?;
+    file.write_all(&0x44u32.to_le_bytes())?;
 
     log::info!("PDB file written successfully");
     Ok(())
@@ -448,18 +532,19 @@ pub fn write_pdb_ext(path: &Path) -> Result<()> {
         file.write_all(&0u32.to_le_bytes())?;  // unknown
         file.write_all(&current_page.to_le_bytes())?;  // page_index
         file.write_all(&table_type.to_le_bytes())?;  // page_type
-        file.write_all(&(current_page + 1).to_le_bytes())?;  // next_page (empty candidate)
+        let empty_candidate = current_page + 1;
+        file.write_all(&empty_candidate.to_le_bytes())?;  // next_page (empty candidate)
         // Rest of page header
         file.write_all(&[0u8; 24])?;
         // Pad to full page
         let remaining = PAGE_SIZE as u64 - (file.stream_position()? - page_start);
         file.write_all(&vec![0u8; remaining as usize])?;
 
-        table_pages.push((table_type, first_page, last_page, current_page + 1));
+        table_pages.push((table_type, first_page, last_page, empty_candidate));
         current_page += 2;  // page + empty candidate
 
         // Write empty candidate page
-        write_empty_candidate_page(&mut file)?;
+        write_empty_candidate_page(&mut file, empty_candidate)?;
     }
 
     // Go back and write table pointers
@@ -718,6 +803,73 @@ fn patch_page_usage(file: &mut File, page_start: u64, free_size: u16, used_size:
     Ok(())
 }
 
+fn row_group_count(num_rows: usize) -> usize {
+    (num_rows + 15) / 16
+}
+
+/// Pad heap to 4-byte alignment after writing a row
+/// Returns the number of padding bytes added
+fn align_to_4(heap: &mut Vec<u8>) -> usize {
+    let remainder = heap.len() % 4;
+    if remainder != 0 {
+        let padding = 4 - remainder;
+        heap.extend(std::iter::repeat(0u8).take(padding));
+        padding
+    } else {
+        0
+    }
+}
+
+fn row_group_bytes(num_rows: usize) -> usize {
+    row_group_count(num_rows) * 36
+}
+
+fn page_padding(heap_len: usize, num_rows: usize) -> Result<usize> {
+    let padding = PAGE_SIZE as isize - HEAP_START as isize - heap_len as isize - row_group_bytes(num_rows) as isize;
+    if padding < 0 {
+        bail!("Page overflow: heap {} rows {} exceed page capacity", heap_len, num_rows);
+    }
+    Ok(padding as usize)
+}
+
+fn write_row_groups<F>(file: &mut File, num_rows: usize, row_offsets: &[u16], unknown_fn: F) -> Result<()>
+where
+    F: Fn(u16) -> u16,
+{
+    let num_groups = row_group_count(num_rows);
+    for group_idx in 0..num_groups {
+        let start_row = group_idx * 16;
+        let end_row = (start_row + 16).min(num_rows);
+
+        let mut offsets = [0u16; 16];
+        let mut flags = 0u16;
+        for (slot, offset) in row_offsets[start_row..end_row].iter().enumerate() {
+            offsets[slot] = *offset;
+            flags |= 1 << slot;
+        }
+
+        for off in offsets.iter().rev() {
+            file.write_all(&off.to_le_bytes())?;
+        }
+
+        let unknown = unknown_fn(flags);
+        file.write_all(&flags.to_le_bytes())?;
+        file.write_all(&unknown.to_le_bytes())?;
+    }
+
+    Ok(())
+}
+
+fn row_group_unknown_high_bit(flags: u16) -> u16 {
+    if flags == 0 {
+        0
+    } else {
+        let leading = flags.leading_zeros() as u16;
+        let idx = 15u16.saturating_sub(leading);
+        1u16 << idx
+    }
+}
+
 /// Write a blank page (no rows)
 ///
 /// If is_empty_candidate is true, writes a completely zeroed page (empty candidate)
@@ -769,9 +921,47 @@ fn write_blank_page(
 
 /// Write an empty candidate page (completely zeroed)
 /// Reference exports have empty candidate pages that are all zeros
-fn write_empty_candidate_page(file: &mut File) -> Result<()> {
-    // Empty candidate pages are completely zeroed - 4096 bytes of zeros
+fn write_empty_candidate_page(file: &mut File, page_index: u32) -> Result<()> {
+    seek_to_page(file, page_index)?;
     file.write_all(&vec![0u8; PAGE_SIZE as usize])?;
+    Ok(())
+}
+
+/// Write the header page content that appears after the 40-byte page header
+/// This structure is present in all Rekordbox header pages and contains pointers
+fn write_header_page_content(file: &mut File, header_page: u32, first_data_page: Option<u32>) -> Result<()> {
+    // Position is at 0x28 (right after page header)
+    // Structure observed in reference export:
+    // +0x00: u32 header_page (this page index)
+    // +0x04: u32 first_data_page (or 0x03ffffff if no data)
+    // +0x08: u32 sentinel (0x03ffffff)
+    // +0x0c: u32 zero
+    // +0x10: u32 zero (but first u16 could be row count or similar)
+    // +0x14: u32 0x1ffff8ff (repeated to fill pattern)
+    // Note: page 1 (Tracks) has 0x00000000 at +0x10, other pages have 0x1fff0000
+
+    file.write_all(&header_page.to_le_bytes())?;
+    let data_page = first_data_page.unwrap_or(0x03ff_ffff);
+    file.write_all(&data_page.to_le_bytes())?;
+    file.write_all(&0x03ff_ffffu32.to_le_bytes())?;
+    file.write_all(&0u32.to_le_bytes())?;
+
+    // Page 1 (Tracks) has different pattern: 00 00 00 00 followed by f8 ff ff 1f
+    // Other pages have: 00 00 ff 1f followed by f8 ff ff 1f
+    if header_page == 1 {
+        file.write_all(&0u32.to_le_bytes())?;
+    } else {
+        file.write_all(&0x1fff_0000u32.to_le_bytes())?;
+    }
+
+    // Fill remaining with the pattern 0x1ffff8ff (f8 ff ff 1f in little endian)
+    let pattern: [u8; 4] = [0xf8, 0xff, 0xff, 0x1f]; // Exact bytes from reference
+    let remaining_bytes = PAGE_SIZE as usize - 0x28 - 20; // 20 bytes written above
+    let pattern_count = remaining_bytes / 4;
+    for _ in 0..pattern_count {
+        file.write_all(&pattern)?;
+    }
+
     Ok(())
 }
 
@@ -808,36 +998,21 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
         heap.extend_from_slice(&((idx + 1) as u32).to_le_bytes()); // id
         let encoded_name = encode_device_sql(genre);
         heap.extend_from_slice(&encoded_name);
+        align_to_4(&mut heap); // Pad row to 4-byte alignment
         row_offsets.push(row_start as u16);
     }
 
     file.write_all(&heap)?;
 
-    let current_pos = file.stream_position()? - page_start;
-    let num_groups = (genres.len() + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4;
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), genres.len())?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(genres.len());
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
-        }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0u16.to_le_bytes())?;
-    }
+    write_row_groups(file, genres.len(), &row_offsets, row_group_unknown_high_bit)?;
 
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())
@@ -899,6 +1074,7 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
         // Encode and append string data at the offset
         let encoded_name = encode_device_sql(artist);
         heap.extend_from_slice(&encoded_name);
+        align_to_4(&mut heap); // Pad row to 4-byte alignment
 
         row_offsets.push(row_start as u16);
     }
@@ -906,35 +1082,16 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
     // Write heap
     file.write_all(&heap)?;
 
-    // Pad to near end of page for row index
-    let current_pos = file.stream_position()? - page_start;
-    let num_groups = (artists.len() + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4;
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), artists.len())?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    // Write row index (offsets from end)
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    // Write row presence flags (+ unknown)
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(artists.len());
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
-        }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0u16.to_le_bytes())?; // unknown padding
-    }
+    write_row_groups(file, artists.len(), &row_offsets, row_group_unknown_high_bit)?;
 
     // Patch usage sizes now that we know padding/heap lengths
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())
@@ -1008,38 +1165,23 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
         // Encode and append string data at the offset
         let encoded_name = encode_device_sql(album);
         heap.extend_from_slice(&encoded_name);
+        align_to_4(&mut heap); // Pad row to 4-byte alignment
 
         row_offsets.push(row_start as u16);
     }
 
     file.write_all(&heap)?;
 
-    let current_pos = file.stream_position()? - page_start;
-    let num_groups = (albums.len() + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4;
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), albums.len())?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(albums.len());
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
-        }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0u16.to_le_bytes())?;
-    }
+    write_row_groups(file, albums.len(), &row_offsets, row_group_unknown_high_bit)?;
 
     // Patch usage sizes for this page
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())
@@ -1088,12 +1230,13 @@ fn write_tracks_table(
     entities: &EntityTables,
     page_index: u32,
     next_page: u32,
+    page_unknown1: u32,
+    unknown4: u8,
 ) -> Result<()> {
     log::debug!("Writing tracks table: {} tracks", tracks.len());
 
     let num_rows_small = tracks.len().min(0xff) as u8;
     let num_rows_large = tracks.len().min(0xffff) as u16;
-    let unknown4 = if tracks.len() > 1 { 0x01 } else { 0x00 };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1106,7 +1249,7 @@ fn write_tracks_table(
         0x20,
         unknown4,
         0x24,
-        0x3e,
+        page_unknown1,
         0,
         0x0001,
         0,
@@ -1301,37 +1444,33 @@ fn write_tracks_table(
 
         // Write string data
         heap.extend_from_slice(&string_data);
+        align_to_4(&mut heap); // Pad row to 4-byte alignment
 
         row_offsets.push(row_start as u16);
     }
 
     file.write_all(&heap)?;
 
-    let current_pos = file.stream_position()? - page_start;
-    let num_groups = (tracks.len() + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4; // offsets + (flags+unknown) per group
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), tracks.len())?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(tracks.len());
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
+    let track_unknown = |flags: u16| {
+        let count = flags.count_ones();
+        if count == 0 {
+            0
+        } else if count == 1 {
+            flags
+        } else {
+            1u16 << ((count as u16).saturating_sub(2))
         }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0u16.to_le_bytes())?; // unknown padding
-    }
+    };
+
+    write_row_groups(file, tracks.len(), &row_offsets, track_unknown)?;
 
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())
@@ -1389,38 +1528,22 @@ fn write_playlist_tree_table(file: &mut File, playlists: &[Playlist], page_index
         // Encode and append string data INLINE (not offset-based!)
         let encoded_name = encode_device_sql(&playlist.name);
         heap.extend_from_slice(&encoded_name);
+        align_to_4(&mut heap); // Pad row to 4-byte alignment
 
         row_offsets.push(row_start as u16);
     }
 
     file.write_all(&heap)?;
 
-    let current_pos = file.stream_position()? - page_start;
-    let total_rows = playlists.len();
-    let num_groups = (total_rows + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4;
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), playlists.len())?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(total_rows);
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
-        }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0u16.to_le_bytes())?;
-    }
+    write_row_groups(file, playlists.len(), &row_offsets, row_group_unknown_high_bit)?;
 
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())
@@ -1491,31 +1614,15 @@ fn write_playlist_entries_table(
 
     file.write_all(&heap)?;
 
-    let current_pos = file.stream_position()? - page_start;
-    let num_groups = (total_entries + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4;
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), total_entries)?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(total_entries);
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
-        }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0u16.to_le_bytes())?;
-    }
+    write_row_groups(file, total_entries, &row_offsets, row_group_unknown_high_bit)?;
 
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())
@@ -1555,12 +1662,12 @@ fn write_colors_table(file: &mut File, page_index: u32, next_page: u32) -> Resul
         next_page,
         num_rows_small,
         num_rows_large,
-        0x7c,  // free_size from reference
         0x00,
+        0x01,
         0x24,
-        0x0048,  // unknown4 - matches reference
+        0x0002,
         0,
-        0x0001,
+        0x0008,
         0,
         0,
     )?;
@@ -1580,40 +1687,22 @@ fn write_colors_table(file: &mut File, page_index: u32, next_page: u32) -> Resul
         // Encode and append name string
         let encoded_name = encode_device_sql(name);
         heap.extend_from_slice(&encoded_name);
+        align_to_4(&mut heap); // Pad row to 4-byte alignment
 
         row_offsets.push(row_start as u16);
     }
 
     file.write_all(&heap)?;
 
-    // Pad to near end of page for row index
-    let current_pos = file.stream_position()? - page_start;
-    let num_groups = (num_rows + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4;
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), num_rows)?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    // Write row offsets in reverse order
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    // Write row presence flags
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(num_rows);
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
-        }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0xffu16.to_le_bytes())?; // unknown16 - reference has 0xff
-    }
+    write_row_groups(file, num_rows, &row_offsets, |flags| flags)?;
 
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())
@@ -1658,37 +1747,22 @@ fn write_columns_table(file: &mut File, columns: &[ColumnEntry], page_index: u32
         // Name as annotated UTF-16 DeviceSQL string
         let encoded_name = encode_device_sql_utf16_annotated(&col.name);
         heap.extend_from_slice(&encoded_name);
+        align_to_4(&mut heap); // Pad row to 4-byte alignment
 
         row_offsets.push(row_start as u16);
     }
 
     file.write_all(&heap)?;
 
-    let current_pos = file.stream_position()? - page_start;
-    let num_groups = (columns.len() + 15) / 16;
-    let index_space_needed = row_offsets.len() * 2 + num_groups * 4;
-    let padding_needed = PAGE_SIZE as u64 - current_pos - index_space_needed as u64;
+    let padding_needed = page_padding(heap.len(), columns.len())?;
     if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed as usize])?;
+        file.write_all(&vec![0u8; padding_needed])?;
     }
 
-    for offset in row_offsets.iter().rev() {
-        file.write_all(&offset.to_le_bytes())?;
-    }
-
-    for group_idx in 0..num_groups {
-        let start_row = group_idx * 16;
-        let end_row = (start_row + 16).min(columns.len());
-        let mut flags = 0u16;
-        for row in start_row..end_row {
-            flags |= 1 << (row - start_row);
-        }
-        file.write_all(&flags.to_le_bytes())?;
-        file.write_all(&0u16.to_le_bytes())?;
-    }
+    write_row_groups(file, columns.len(), &row_offsets, |flags| flags)?;
 
     let free_size = padding_needed as u16;
-    let used_size = (HEAP_START + heap.len()) as u16;
+    let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
 
     Ok(())

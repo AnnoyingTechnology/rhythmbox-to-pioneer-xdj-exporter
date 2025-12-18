@@ -70,8 +70,7 @@ impl UsbOrganizer {
         fs::create_dir_all(&self.usbanlz_dir)
             .context("Failed to create PIONEER/USBANLZ directory")?;
 
-        fs::create_dir_all(&self.contents_dir)
-            .context("Failed to create Contents directory")?;
+        fs::create_dir_all(&self.contents_dir).context("Failed to create Contents directory")?;
 
         // Write setting files required by Pioneer hardware
         self.write_setting_files()?;

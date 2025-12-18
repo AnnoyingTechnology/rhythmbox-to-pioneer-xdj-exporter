@@ -23,7 +23,12 @@ const PPTH_HEADER_SIZE: u32 = 16;
 ///
 /// Phase 1: PMAI header + PPTH section (path to audio file)
 /// Phase 2: Add beatgrid and waveform sections
-pub fn write_dat_file(path: &Path, _track: &Track, _analysis: &AnalysisResult, audio_path: &str) -> Result<()> {
+pub fn write_dat_file(
+    path: &Path,
+    _track: &Track,
+    _analysis: &AnalysisResult,
+    audio_path: &str,
+) -> Result<()> {
     log::debug!("Writing ANLZ .DAT file: {:?}", path);
 
     // Ensure parent directories exist (for hierarchical ANLZ structure)
@@ -45,7 +50,12 @@ pub fn write_dat_file(path: &Path, _track: &Track, _analysis: &AnalysisResult, a
 ///
 /// Phase 1: PMAI header + PPTH section
 /// Phase 2: Add color waveform sections
-pub fn write_ext_file(path: &Path, _track: &Track, _analysis: &AnalysisResult, audio_path: &str) -> Result<()> {
+pub fn write_ext_file(
+    path: &Path,
+    _track: &Track,
+    _analysis: &AnalysisResult,
+    audio_path: &str,
+) -> Result<()> {
     log::debug!("Writing ANLZ .EXT file: {:?}", path);
 
     // Ensure parent directories exist (for hierarchical ANLZ structure)

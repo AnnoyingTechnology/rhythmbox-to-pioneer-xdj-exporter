@@ -13,14 +13,18 @@ fn main() {
 
     // List keys
     println!("=== Keys ===\n");
-    if let Some(table) = header.tables.iter()
-        .find(|t| matches!(t.page_type, PageType::Keys)) {
-
-        let pages = header.read_pages(
-            &mut file,
-            binrw::Endian::Little,
-            (&table.first_page, &table.last_page),
-        ).expect("Failed to read keys pages");
+    if let Some(table) = header
+        .tables
+        .iter()
+        .find(|t| matches!(t.page_type, PageType::Keys))
+    {
+        let pages = header
+            .read_pages(
+                &mut file,
+                binrw::Endian::Little,
+                (&table.first_page, &table.last_page),
+            )
+            .expect("Failed to read keys pages");
 
         for page in pages {
             for row_group in &page.row_groups {
@@ -35,14 +39,18 @@ fn main() {
 
     // List colors
     println!("\n=== Colors ===\n");
-    if let Some(table) = header.tables.iter()
-        .find(|t| matches!(t.page_type, PageType::Colors)) {
-
-        let pages = header.read_pages(
-            &mut file,
-            binrw::Endian::Little,
-            (&table.first_page, &table.last_page),
-        ).expect("Failed to read colors pages");
+    if let Some(table) = header
+        .tables
+        .iter()
+        .find(|t| matches!(t.page_type, PageType::Colors))
+    {
+        let pages = header
+            .read_pages(
+                &mut file,
+                binrw::Endian::Little,
+                (&table.first_page, &table.last_page),
+            )
+            .expect("Failed to read colors pages");
 
         for page in pages {
             for row_group in &page.row_groups {
@@ -57,14 +65,18 @@ fn main() {
 
     // List labels
     println!("\n=== Labels ===\n");
-    if let Some(table) = header.tables.iter()
-        .find(|t| matches!(t.page_type, PageType::Labels)) {
-
-        let pages = header.read_pages(
-            &mut file,
-            binrw::Endian::Little,
-            (&table.first_page, &table.last_page),
-        ).expect("Failed to read labels pages");
+    if let Some(table) = header
+        .tables
+        .iter()
+        .find(|t| matches!(t.page_type, PageType::Labels))
+    {
+        let pages = header
+            .read_pages(
+                &mut file,
+                binrw::Endian::Little,
+                (&table.first_page, &table.last_page),
+            )
+            .expect("Failed to read labels pages");
 
         for page in pages {
             for row_group in &page.row_groups {

@@ -4,8 +4,8 @@
 //! track metadata and playlist structure.
 
 mod database;
-mod playlists;
 mod model;
+mod playlists;
 
 pub use database::parse_database;
 pub use playlists::parse_playlists;
