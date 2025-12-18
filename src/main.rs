@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use pioneer_exporter::analysis::StubAnalyzer;
+use pioneer_exporter::analysis::{RealAnalyzer, StubAnalyzer};
 use pioneer_exporter::validation::validate_export;
 use pioneer_exporter::{ExportConfig, ExportPipeline};
 use std::path::PathBuf;
@@ -40,6 +40,10 @@ struct Args {
     /// Only validate existing export (don't create new export)
     #[arg(long)]
     validate: bool,
+
+    /// Skip BPM analysis (faster export, no tempo info)
+    #[arg(long)]
+    no_bpm: bool,
 }
 
 fn main() -> Result<()> {
@@ -49,7 +53,11 @@ fn main() -> Result<()> {
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
-    log::info!("Pioneer Exporter - Phase 1 (Stub Analysis)");
+    if args.no_bpm {
+        log::info!("Pioneer Exporter - Phase 1 (Stub Analysis)");
+    } else {
+        log::info!("Pioneer Exporter - Phase 2 (BPM Analysis)");
+    }
     log::info!("===========================================");
 
     // If validate-only mode, just validate and exit
@@ -90,12 +98,16 @@ fn main() -> Result<()> {
         config = config.with_playlists(args.playlists_filter);
     }
 
-    // Create export pipeline with stub analyzer (Phase 1)
-    let analyzer = StubAnalyzer::new();
-    let pipeline = ExportPipeline::new(config, analyzer)?;
-
-    // Run export
-    pipeline.export(&library)?;
+    // Create export pipeline - use RealAnalyzer for BPM detection or StubAnalyzer if disabled
+    if args.no_bpm {
+        let analyzer = StubAnalyzer::new();
+        let pipeline = ExportPipeline::new(config, analyzer)?;
+        pipeline.export(&library)?;
+    } else {
+        let analyzer = RealAnalyzer::new();
+        let pipeline = ExportPipeline::new(config, analyzer)?;
+        pipeline.export(&library)?;
+    }
 
     log::info!("Export completed successfully!");
     log::info!("USB stick ready at: {:?}", args.output);

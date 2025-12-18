@@ -4,8 +4,8 @@ This document describes the phased implementation approach for the Rhythmbox →
 
 ## Current Status (2025-12-18)
 
-**Phase:** Phase 1 COMPLETE + Phase 1.5 COMPLETE
-**Status:** ✅ Full export working on XDJ-XZ hardware with multi-page track support
+**Phase:** Phase 1 COMPLETE + Phase 2.1 IN PROGRESS (BPM detection implemented but not displaying)
+**Status:** ⚠️ BPM detection works, data is written correctly, but XDJ-XZ does not display BPM
 
 ### What Works
 - XDJ-XZ recognizes USB and displays playlists
@@ -13,12 +13,49 @@ This document describes the phased implementation approach for the Rhythmbox →
 - Artist/Album/Title metadata displays properly
 - Accented characters (UTF-16LE encoding) display correctly
 - Multi-page track tables (tested with 45+ tracks across 4 pages)
-- rekordcrate validation passes
+- **BPM detection** via aubio-rs (detects correct tempo values)
+- **PQTZ beatgrid** written to ANLZ .DAT files
+- **Tempo field** written to PDB track table (offset 0x38-0x3B)
 
-### Current Limitations (Phase 2 features)
-- **BPM/tempo**: Shows 0 (no detection yet)
-- **Waveforms**: Not displayed (stub ANLZ files)
-- **Beatgrid**: Not present
+### Current Issue: BPM Not Displaying on XDJ-XZ
+
+**What we've implemented:**
+1. ✅ BPM detection using `aubio-rs` + `symphonia` (correct values detected)
+2. ✅ Tempo field in PDB track row at offset 0x38-0x3B (BPM × 100, little-endian)
+3. ✅ PQTZ beatgrid section in ANLZ .DAT files (big-endian, correct format per Deep Symmetry docs)
+4. ✅ PVBR section in ANLZ .DAT files
+5. ✅ PPTH path with UTF-16BE encoding and NUL terminator
+6. ✅ `analyze_path` string (index 14) pointing to ANLZ file
+7. ✅ `analyze_date` string (index 15) set to current date
+
+**Verified correct in hex dumps:**
+- PDB tempo: `b136 0000` = 0x000036b1 = 14001 = 140.01 BPM ✓
+- PQTZ header: magic, len_header=24, unknown2=0x00800000 ✓
+- PQTZ beats: tempo=0x36b1, times incrementing correctly ✓
+- ANLZ path matches actual file location ✓
+
+**What we've tried that didn't help:**
+- Adding PVBR section to ANLZ
+- Adding NUL terminator to PPTH path
+- Setting analyze_date string
+- Browsing from PLAYLIST view (not FOLDER)
+- Loading track onto deck
+
+**Unknown factors:**
+- The `bitmask` field at offset 0x04-0x07 in track row (currently 0x0700) - meaning undocumented
+- Unknown fields in PMAI header after file_length
+- Possible additional ANLZ sections required (PCOB cue list?)
+- Possible firmware-specific requirements for XDJ-XZ
+
+**Next steps to investigate:**
+1. Compare against a real Rekordbox export with BPM (need actual Rekordbox software)
+2. Try adding empty PCOB (cue list) section
+3. Research XDJ-XZ specific requirements
+4. Check if waveform sections (PWAV/PWV2) are required for BPM display
+
+### Current Limitations (remaining Phase 2 features)
+- **BPM display**: Detection works but XDJ doesn't show it (investigation ongoing)
+- **Waveforms**: Not implemented (PWAV, PWV2, PWV3, etc.)
 - **Key detection**: Not implemented
 - **Album artwork**: Not extracted/displayed
 
@@ -78,31 +115,46 @@ flags = 0x90, length = byte_len + 4
 
 ## Phase 2 Plan: Audio Analysis Features
 
-### 2.1 BPM Detection (Priority: HIGH)
+### 2.1 BPM Detection (Priority: HIGH) - IMPLEMENTED (display issue pending)
 
 **Goal:** Detect tempo and populate PDB tempo field + ANLZ beatgrid
 
-**Approach:**
-- Decode audio to PCM using `symphonia`
-- Detect BPM and beat timestamps using `aubio-rs`
-- Store BPM in track's tempo field (BPM × 100 as u32)
-- Beat timestamps reused for beatgrid (PQTZ) generation
+**Status:** ✅ Detection works, ⚠️ XDJ display not working
 
-**Caching Strategy:**
+**Implementation (complete):**
+- `src/analysis/bpm.rs` - BPM detection using aubio-rs + symphonia
+- `src/analysis/real.rs` - RealAnalyzer that uses BPM detection
+- `src/anlz/writer.rs` - PQTZ beatgrid generation
+- `src/pdb/writer.rs` - Tempo field at offset 0x38-0x3B
+
+**How it works:**
+1. Decode audio to mono PCM using `symphonia`
+2. Run through `aubio-rs` Tempo detector (SpecFlux onset mode)
+3. Generate PQTZ beatgrid with constant tempo (beat_number 1-4, tempo×100, time_ms)
+4. Write tempo to PDB track row
+5. Write PQTZ section to ANLZ .DAT file
+
+**CLI usage:**
+```bash
+# With BPM detection (default)
+cargo run --release -- --output /path/to/usb --playlist "MyPlaylist"
+
+# Without BPM detection (faster, Phase 1 behavior)
+cargo run --release -- --output /path/to/usb --playlist "MyPlaylist" --no-bpm
+```
+
+**Caching Strategy (TODO):**
 - Write detected BPM to ID3 TBPM tag (MP3) or equivalent Vorbis comment
 - Read existing tag before analysis to skip re-detection
 - Source file owns the canonical BPM value
 
-**Recommended Libraries:**
+**Libraries used:**
 | Library | Purpose | License | Notes |
 |---------|---------|---------|-------|
-| `aubio-rs` | Tempo + beat detection | GPL-3.0 | Primary choice, gives BPM + beat timestamps |
+| `aubio-rs` | Tempo detection | GPL-3.0 | Uses system libaubio via pkg-config |
 | `symphonia` | Audio decoding | MPL-2.0 | Pure Rust, good codec coverage |
-| `rubato` | Resampling | MIT | Normalize sample rate before analysis |
-
-**Alternatives:**
-- QM Vamp plugins (C++) - beat tracker, good fallback for difficult genres
-- Essentia (AGPL) - high quality but restrictive license, use as optional external
+| `lofty` | Tag reading/writing | MIT/Apache | For future TBPM caching |
+| `chrono` | Date formatting | MIT/Apache | For analyze_date field |
 
 ### 2.2 Key Detection (Priority: HIGH)
 

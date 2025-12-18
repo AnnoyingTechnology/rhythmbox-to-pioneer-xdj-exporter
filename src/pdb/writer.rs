@@ -1415,8 +1415,13 @@ fn write_tracks_table(
         let track_number = track.track_number.unwrap_or(0) as u32;
         heap.extend_from_slice(&track_number.to_le_bytes());
 
-        // 0x38-0x3B: tempo (BPM * 100)
-        let tempo = track.bpm.map(|bpm| (bpm * 100.0) as u32).unwrap_or(0);
+        // 0x38-0x3B: tempo (BPM * 100) - prefer analyzed BPM, fallback to track metadata
+        let tempo = track_meta
+            .analysis
+            .bpm
+            .or(track.bpm)
+            .map(|bpm| (bpm * 100.0) as u32)
+            .unwrap_or(0);
         heap.extend_from_slice(&tempo.to_le_bytes());
 
         // 0x3C-0x3F: genre_id
@@ -1492,12 +1497,18 @@ fn write_tracks_table(
         // Initialize all offsets to point to the empty string
         let mut string_offsets: Vec<u16> = vec![empty_string_offset; 21];
 
-        // String 14: analyze_path (CRITICAL)
+        // String 14: analyze_path (CRITICAL for BPM display)
         let anlz_path_str = track_meta.anlz_path.to_string_lossy();
         if !anlz_path_str.is_empty() {
             string_offsets[14] = (string_data_start + string_data.len()) as u16;
             string_data.extend_from_slice(&encode_device_sql(&anlz_path_str));
         }
+
+        // String 15: analyze_date (CRITICAL for BPM display - format: YYYY-MM-DD)
+        // Use current date to indicate track has been analyzed
+        let analyze_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        string_offsets[15] = (string_data_start + string_data.len()) as u16;
+        string_data.extend_from_slice(&encode_device_sql(&analyze_date));
 
         // String 17: title (CRITICAL)
         if !track.title.is_empty() {
