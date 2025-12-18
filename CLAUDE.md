@@ -61,81 +61,142 @@ flags = 0x90, length = byte_len + 4
 
 ---
 
+## XDJ Hardware Constraints (from Pioneer manual)
+
+**Supported Audio Formats:**
+- MP3, AAC, WAV, AIFF, FLAC
+
+**ID3 Tag Support:**
+- v1, v1.1, v2.2.0, v2.3.0, v2.4.0
+
+**Artwork Requirements:**
+- JPEG only (.jpg or .jpeg extension)
+- Maximum size: 800×800 pixels
+- Embedded in audio file metadata
+
+---
+
 ## Phase 2 Plan: Audio Analysis Features
 
-### 2.1 BPM Detection
+### 2.1 BPM Detection (Priority: HIGH)
 
 **Goal:** Detect tempo and populate PDB tempo field + ANLZ beatgrid
 
 **Approach:**
-- Use `aubio` or `librosa` bindings for beat detection
+- Decode audio to PCM using `symphonia`
+- Detect BPM and beat timestamps using `aubio-rs`
 - Store BPM in track's tempo field (BPM × 100 as u32)
-- Generate beatgrid for ANLZ files
+- Beat timestamps reused for beatgrid (PQTZ) generation
 
 **Caching Strategy:**
-- Write detected BPM to ID3 TBPM tag (MP3) or equivalent
-- Read existing BPM tag before analysis to skip re-detection
+- Write detected BPM to ID3 TBPM tag (MP3) or equivalent Vorbis comment
+- Read existing tag before analysis to skip re-detection
 - Source file owns the canonical BPM value
 
-**Libraries to evaluate:**
-- `aubio-rs` - Rust bindings for aubio
-- `symphonia` - Pure Rust audio decoding
-- Python `librosa` via subprocess (fallback)
+**Recommended Libraries:**
+| Library | Purpose | License | Notes |
+|---------|---------|---------|-------|
+| `aubio-rs` | Tempo + beat detection | GPL-3.0 | Primary choice, gives BPM + beat timestamps |
+| `symphonia` | Audio decoding | MPL-2.0 | Pure Rust, good codec coverage |
+| `rubato` | Resampling | MIT | Normalize sample rate before analysis |
 
-### 2.2 Key Detection
+**Alternatives:**
+- QM Vamp plugins (C++) - beat tracker, good fallback for difficult genres
+- Essentia (AGPL) - high quality but restrictive license, use as optional external
+
+### 2.2 Key Detection (Priority: HIGH)
 
 **Goal:** Detect musical key and populate PDB key_id field
 
 **Approach:**
-- Use `libkeyfinder` or Essentia for key detection
-- Map to Rekordbox key notation (1A-12B, Open Key format)
+- Use `libkeyfinder` via FFI or CLI wrapper
+- Map to Rekordbox key notation (Open Key: 1A-12B)
 - Store in Keys table with proper ID reference
 
 **Caching Strategy:**
-- Write to ID3 TKEY tag (standard) or custom tag
-- Read existing key before analysis
+- Write to ID3 TKEY tag (standard) or Vorbis INITIALKEY
+- Read existing tag before analysis
 
-**Libraries to evaluate:**
-- `keyfinder-rs` - Rust bindings for libkeyfinder
-- Essentia (C++ with potential Rust bindings)
+**Recommended Libraries:**
+| Library | Purpose | License | Notes |
+|---------|---------|---------|-------|
+| `libkeyfinder` | Key detection | GPL-3.0+ | Widely used (Mixxx), reliable |
+| QM Vamp key estimator | Alternative | BSD | Part of QM plugin suite |
 
-### 2.3 Waveform Generation
+**Alternatives:**
+- Essentia KeyExtractor (AGPL) - high quality, optional external backend
+
+### 2.3 Waveform Generation (Priority: HIGH)
 
 **Goal:** Generate preview and detail waveforms for ANLZ files
 
 **Waveform Types (per Deep Symmetry docs):**
-1. **PWAV** - Preview waveform (400 data points, blue)
-2. **PWV2** - Preview waveform (400 points, RGB)
-3. **PWV3** - Detail waveform (variable, ~1 point/150 samples)
-4. **PWV4** - Detail waveform with color
-5. **PWV5** - High-resolution detail waveform
+| Tag | Description | Resolution |
+|-----|-------------|------------|
+| PWAV | Preview waveform (blue) | 400 points |
+| PWV2 | Preview waveform (RGB) | 400 points |
+| PWV3 | Detail waveform | ~1 point/150 samples |
+| PWV4 | Detail waveform (color) | Variable |
+| PWV5 | High-res detail | Variable |
 
 **Approach:**
-- Decode audio to PCM samples
-- Compute RMS/peak values at appropriate intervals
-- Apply frequency analysis for colored waveforms
-- Write to ANLZ .DAT and .EXT files
+1. Decode audio to PCM using `symphonia`
+2. Compute amplitude/peaks using `dasp` (RMS, peak extraction)
+3. For colored waveforms: FFT with `rustfft` + `realfft` for band energy (low/mid/high)
+4. Write to ANLZ .DAT and .EXT files
+
+**Recommended Libraries:**
+| Library | Purpose | License | Notes |
+|---------|---------|---------|-------|
+| `symphonia` | Decode to PCM | MPL-2.0 | Primary decoder |
+| `dasp` | Signal processing | MIT/Apache | RMS, windowing, peaks |
+| `rustfft` + `realfft` | FFT | MIT/Apache | Band energy for RGB waveforms |
+
+**Alternatives:**
+- BBC `audiowaveform` CLI - fast waveform generation, then convert to ANLZ format
 
 **Caching Strategy:**
-- Store computed waveforms in cache directory
-- Key by file hash (content-addressable)
-- Location: `~/.cache/pioneer-exporter/waveforms/`
+- Store computed waveforms in SQLite cache
+- Key by file content hash (SHA256 of first 1MB + file size)
+- Location: `~/.cache/pioneer-exporter/`
 
-### 2.4 Album Artwork
+### 2.4 Album Artwork (Priority: MEDIUM)
 
 **Goal:** Extract embedded artwork and create Rekordbox artwork entries
 
-**Approach:**
-- Extract cover art from audio file metadata (ID3 APIC, Vorbis PICTURE)
-- Convert to JPEG if necessary, resize to standard dimensions
-- Write to PIONEER/Artwork/ directory
-- Update Artwork table with references
-- Link tracks to artwork via artwork_id field
+**XDJ Constraints:**
+- JPEG only (.jpg/.jpeg)
+- Maximum 800×800 pixels
 
-**Artwork dimensions (per Rekordbox):**
+**Approach:**
+1. Extract cover art using `lofty` (ID3 APIC, Vorbis PICTURE, MP4, etc.)
+2. Resize to standard dimensions using `image` crate
+3. Convert to JPEG if necessary
+4. Write to PIONEER/Artwork/ directory
+5. Update Artwork table with references
+
+**Artwork Sizes (Rekordbox):**
 - Thumbnail: 80×80
 - Small: 160×160
-- Large: 240×240 or 320×320
+- Large: 240×240 (or up to 800×800 for XDJ)
+
+**Recommended Libraries:**
+| Library | Purpose | License | Notes |
+|---------|---------|---------|-------|
+| `lofty` | Tag reading/writing | MIT/Apache | Multi-format, extracts APIC |
+| `id3` | MP3-only tags | MIT | Lightweight alternative |
+| `image` | Resize + JPEG encode | MIT | Standard image processing |
+
+### 2.5 Beatgrid (Priority: LOW)
+
+**Goal:** Generate beat grid for PQTZ section in ANLZ files
+
+**Approach:**
+- Reuse beat timestamps from `aubio-rs` Tempo detection
+- Quantize to grid, handle tempo changes
+- Write PQTZ section to ANLZ .DAT files
+
+**Note:** Beatgrid depends on BPM detection, implement after 2.1 is stable.
 
 ---
 
@@ -276,6 +337,39 @@ verify_after_export = true
 8. **GUI Application** - User-friendly interface
 9. **Binary Distribution** - Easy installation
 10. **Other library sources** - iTunes, Traktor, etc.
+
+---
+
+## License Considerations
+
+### Phase 2 Library Licenses
+
+| Library | License | Bundling Impact |
+|---------|---------|-----------------|
+| `symphonia` | MPL-2.0 | Safe to bundle |
+| `dasp` | MIT/Apache | Safe to bundle |
+| `rustfft` | MIT/Apache | Safe to bundle |
+| `lofty` | MIT/Apache | Safe to bundle |
+| `image` | MIT | Safe to bundle |
+| `rubato` | MIT | Safe to bundle |
+| `aubio-rs` | GPL-3.0 | **Requires GPL for binary** |
+| `libkeyfinder` | GPL-3.0+ | **Requires GPL for binary** |
+
+### Options for GPL-Free Distribution
+
+1. **Accept GPL** - Distribute under GPL-3.0 (most straightforward)
+2. **External analyzers** - Ship GPL tools as separate binaries, call via subprocess
+3. **Optional features** - Make GPL dependencies optional at compile time
+4. **Alternative algorithms** - Use permissively-licensed alternatives (if quality sufficient)
+
+### Recommendation
+
+For a DJ tool, GPL is generally acceptable since:
+- Target users are end-users, not developers embedding the library
+- Mixxx (popular open-source DJ software) uses GPL
+- The analysis quality of aubio/libkeyfinder is well-proven
+
+If AGPL libraries (Essentia) are needed, use as external subprocess to avoid license propagation.
 
 ---
 
