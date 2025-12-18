@@ -124,23 +124,47 @@ pub fn write_pdb(
 
     // Write file header and pre-size the file so all reference pages exist
     write_file_header(&mut file, num_tables)?;
-    file.set_len((REFERENCE_NEXT_UNUSED_PAGE as u64) * PAGE_SIZE as u64)?;
 
-    // Split tracks across the reference track data pages (page 2 and 51)
-    let first_track_count = tracks.len().min(9);
-    let track_page_one = &tracks[..first_track_count];
-    let track_page_two = &tracks[first_track_count..];
+    // Calculate track page allocation
+    // Conservative estimate: ~12 tracks per page to avoid overflow
+    // (track rows are variable size due to strings)
+    const TRACKS_PER_PAGE: usize = 12;
+
+    // Split tracks into chunks
+    let mut track_chunks: Vec<&[TrackMetadata]> = Vec::new();
+    let mut remaining = &tracks[..];
+    while !remaining.is_empty() {
+        let chunk_size = remaining.len().min(TRACKS_PER_PAGE);
+        track_chunks.push(&remaining[..chunk_size]);
+        remaining = &remaining[chunk_size..];
+    }
+
+    // Track data pages: use reference pages 2, 51 first, then allocate new pages
+    let mut track_data_pages: Vec<u32> = vec![2, 51];
+    let mut next_unused_page = REFERENCE_NEXT_UNUSED_PAGE;
+
+    // Add more pages if needed (beyond the 2 reference pages)
+    while track_data_pages.len() < track_chunks.len() {
+        track_data_pages.push(next_unused_page);
+        next_unused_page += 1;
+    }
+
+    // Pre-size file to accommodate all pages
+    file.set_len((next_unused_page as u64) * PAGE_SIZE as u64)?;
+
+    log::debug!("Tracks: {} total, {} chunks, pages: {:?}",
+        tracks.len(), track_chunks.len(), &track_data_pages[..track_chunks.len()]);
 
     for layout in TABLE_LAYOUTS {
         match layout.table {
             TableType::Tracks => {
-                // Header page
+                // Header page - point to first track data page
                 seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
                     layout.header_page,
                     TableType::Tracks as u32,
-                    layout.data_pages[0],
+                    track_data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -152,35 +176,41 @@ pub fn write_pdb(
                     0x03ec,
                     0x0001,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), TableType::Tracks)?;
+                write_header_page_content(&mut file, layout.header_page, Some(track_data_pages[0]), TableType::Tracks)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
-                // First track data page points to the second track page
-                seek_to_page(&mut file, layout.data_pages[0])?;
-                write_tracks_table(
-                    &mut file,
-                    track_page_one,
-                    &entities,
-                    layout.data_pages[0],
-                    layout.data_pages.get(1).copied().unwrap_or(layout.empty_candidate),
-                    0x0038,
-                    0x01,
-                )?;
+                // Write each track data page
+                let mut current_track_id = 1u32;
+                for (chunk_idx, track_chunk) in track_chunks.iter().enumerate() {
+                    if track_chunk.is_empty() {
+                        continue;
+                    }
 
-                // Second track data page (if any rows remain) points to the empty candidate
-                if let Some(&second_page) = layout.data_pages.get(1) {
-                    seek_to_page(&mut file, second_page)?;
+                    let page_num = track_data_pages[chunk_idx];
+                    let next_page = track_data_pages.get(chunk_idx + 1)
+                        .copied()
+                        .unwrap_or(layout.empty_candidate);
+
+                    // Page parameters based on position (matches reference pattern)
+                    let page_unknown1 = if chunk_idx == 0 { 0x0038u32 } else { 0x003eu32 };
+                    let unknown4 = if chunk_idx == 0 { 0x01u8 } else { 0x00u8 };
+
+                    seek_to_page(&mut file, page_num)?;
                     write_tracks_table(
                         &mut file,
-                        track_page_two,
+                        track_chunk,
                         &entities,
-                        second_page,
-                        layout.empty_candidate,
-                        0x003e,
-                        0x00,
+                        page_num,
+                        next_page,
+                        page_unknown1,
+                        unknown4,
+                        current_track_id,
                     )?;
+
+                    current_track_id += track_chunk.len() as u32;
                 }
 
+                // Write empty candidate page (always at reference location 55)
                 seek_to_page(&mut file, layout.empty_candidate)?;
                 write_empty_candidate_page(&mut file, layout.empty_candidate)?;
             }
@@ -1288,11 +1318,12 @@ fn write_tracks_table(
     next_page: u32,
     page_unknown1: u32,
     unknown4: u8,
+    start_track_id: u32,
 ) -> Result<()> {
-    log::debug!("Writing tracks table: {} tracks", tracks.len());
+    log::debug!("Writing tracks table: {} tracks (starting ID: {})", tracks.len(), start_track_id);
 
     let num_rows_small = tracks.len().min(0xff) as u8;
-    let num_rows_large = 0u16; // Reference often has 0
+    let num_rows_large = tracks.len() as u16; // Row count (matches num_rows_small for track tables)
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1322,7 +1353,7 @@ fn write_tracks_table(
         // Get IDs
         let artist_id = *entities.artist_map.get(&track.artist).unwrap_or(&0);
         let album_id = *entities.album_map.get(&track.album).unwrap_or(&0);
-        let track_id = (idx + 1) as u32;
+        let track_id = start_track_id + idx as u32;
 
         // File type
         let file_type = track.file_path
