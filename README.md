@@ -6,16 +6,12 @@ Export Rhythmbox music libraries to Pioneer USB format (compatible with XDJ-XZ a
 
 **Successfully tested on XDJ-XZ hardware (2025-12-18)**
 
+### What Works
 - Playlists display and are navigable
 - Tracks load and play correctly
 - Artist/Album/Title metadata displays properly
 - Accented characters (UTF-16) display correctly
-
-### What Works
-- Full PDB database generation with all 20 table types
-- Playlist export with track metadata
-- USB directory structure creation
-- Audio file copying
+- Multi-page track support (tested with 45+ tracks)
 - rekordcrate validation passes
 
 ### Current Limitations
@@ -23,8 +19,9 @@ Export Rhythmbox music libraries to Pioneer USB format (compatible with XDJ-XZ a
 - No waveform display (Phase 2 feature)
 - No beatgrid (Phase 2 feature)
 - No key detection (Phase 2 feature)
+- No album artwork (Phase 2 feature)
 
-See [CLAUDE.md](CLAUDE.md) for detailed implementation notes and debugging history.
+See [CLAUDE.md](CLAUDE.md) for detailed implementation notes and Phase 2 roadmap.
 
 ## Quick Start
 
@@ -76,9 +73,9 @@ Or export directly to the USB mount point.
 ```
 [INFO] Pioneer Exporter - Phase 1 (Stub Analysis)
 [INFO] Loading Rhythmbox library...
-[INFO] Library loaded: 9298 tracks, 34 playlists
-[INFO] Filtering to 2 playlist(s): ["REKORDBOX1", "REKORDBOX2"]
-[INFO] Exporting 10 tracks, 2 playlists
+[INFO] Library loaded: 9298 tracks, 36 playlists
+[INFO] Filtering to 3 playlist(s): ["Le FONK", "Loup", "BASS"]
+[INFO] Exporting 45 tracks, 3 playlists
 [INFO] Processing tracks...
 [INFO] Export completed successfully!
 [INFO] Validation passed!
@@ -91,16 +88,18 @@ Or export directly to the USB mount point.
 **Phase 1 (Complete):** Core export system with stub analysis
 - Rhythmbox XML parsing
 - PDB database writing (all 20 table types)
+- Multi-page track support
 - ANLZ stub file generation
 - USB file organization
 - Audio file copying
 - UTF-16 encoding for international characters
 
-**Phase 2 (Future):** Real audio analysis
+**Phase 2 (Planned):** Real audio analysis
 - BPM detection
 - Musical key detection
 - Waveform generation
 - Beatgrid creation
+- Album artwork extraction
 
 ### Project Structure
 
@@ -132,6 +131,7 @@ This project implements the Rekordbox USB export format based on reverse-enginee
 ## Key Implementation Details
 
 ### String Encoding
+
 The PDB format uses "DeviceSQL" string encoding:
 - **Short ASCII:** For strings ≤126 chars containing only ASCII
 - **Long ASCII:** For longer ASCII-only strings
@@ -140,9 +140,17 @@ The PDB format uses "DeviceSQL" string encoding:
 Strings with accented characters (é, ü, ñ, etc.) are automatically encoded as UTF-16LE.
 
 ### Reference Binary Data
+
 Some tables (Columns, HistoryPlaylists) use byte-perfect copies from a reference Rekordbox export because the XDJ hardware is extremely sensitive to their exact structure:
 - `src/pdb/reference_columns.bin` - 27 column definitions
 - `src/pdb/reference_history_playlists.bin` - History playlist entries
+
+### Multi-Page Track Support
+
+Tracks are split across multiple pages (~12 tracks per page) to avoid page overflow:
+- Reference pages 2 and 51 are used first
+- Additional pages are allocated starting at page 56
+- Pages are linked via next_page pointers
 
 ## Testing
 
@@ -155,6 +163,9 @@ cargo test --lib
 ```bash
 cargo run --release -- --validate --output /path/to/existing/export
 ```
+
+### Hardware Testing
+Always test on actual Pioneer hardware - rekordcrate validation is necessary but not sufficient.
 
 ## Development
 
@@ -198,14 +209,30 @@ The architecture is designed for easy extension:
 - `clap` - CLI argument parsing
 - `log` / `env_logger` - Logging
 
-### Phase 2 (Future)
-- `symphonia` or `ffmpeg-next` - Audio decoding
-- Essentia or aubio - Beat/tempo detection
-- libkeyfinder - Key detection
+### Phase 2 (Planned)
+- `symphonia` - Audio decoding
+- `aubio-rs` or similar - Beat/tempo detection
+- `keyfinder-rs` - Key detection
+- `rayon` - Parallel processing
 
-## Documentation
+## Roadmap
 
-- [CLAUDE.md](CLAUDE.md) - Implementation strategy and debugging history
+### Phase 2: Audio Analysis
+- [ ] BPM detection with ID3 tag caching
+- [ ] Key detection with ID3 tag caching
+- [ ] Preview waveform generation
+- [ ] Detail waveform generation
+- [ ] Album artwork extraction
+
+### Phase 3: Performance
+- [ ] Incremental exports (skip unchanged files)
+- [ ] Parallel audio analysis
+- [ ] SQLite cache for waveforms/beatgrids
+
+### Phase 4: Distribution
+- [ ] Pre-built Linux binaries
+- [ ] Simple GUI for playlist selection
+- [ ] Configuration file support
 
 ## Acknowledgments
 
