@@ -126,9 +126,9 @@ pub fn write_pdb(
     write_file_header(&mut file, num_tables)?;
 
     // Calculate track page allocation
-    // Conservative estimate: ~12 tracks per page to avoid overflow
-    // (track rows are variable size due to strings)
-    const TRACKS_PER_PAGE: usize = 12;
+    // Conservative estimate: ~8 tracks per page to avoid overflow
+    // (track rows are variable size due to 21 string fields + long paths)
+    const TRACKS_PER_PAGE: usize = 8;
 
     // Split tracks into chunks
     let mut track_chunks: Vec<&[TrackMetadata]> = Vec::new();

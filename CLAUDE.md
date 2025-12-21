@@ -2,77 +2,47 @@
 
 This document describes the phased implementation approach for the Rhythmbox → Pioneer USB exporter.
 
-## Current Status (2025-12-20)
+## Current Status (2025-12-21)
 
-**Phase:** Phase 1 COMPLETE + Phase 2.1 IN PROGRESS (BPM detection implemented but not displaying)
-**Status:** ✅ PDB validation passes with rekordcrate, ready for hardware testing
+**Phase:** Phase 1 COMPLETE + Phase 2.1 IN PROGRESS
+**Status:** ✅ Track info displays on XDJ-XZ! Ready for extended testing.
 
 ### What Works
 - ✅ XDJ-XZ recognizes USB and displays playlists
 - ✅ Tracks load and play correctly
-- ✅ Artist/Album/Title metadata displays properly
+- ✅ **Full track info displays** (title, artist, album, genre, duration, etc.)
 - ✅ Accented characters (UTF-16LE encoding) display correctly
 - ✅ Multi-page track tables (tested with 45+ tracks across 4 pages)
 - ✅ **BPM detection** via aubio-rs (detects correct tempo values)
 - ✅ **PQTZ beatgrid** written to ANLZ .DAT files
 - ✅ **Tempo field** written to PDB track table (offset 0x38-0x3B)
-- ✅ **rekordcrate validation** passes for all exports
+- ✅ **File organization** matches Rekordbox (Contents/Artist/Album/file.ext)
 
-### Recent Fixes (2025-12-20)
+### Recent Fixes (2025-12-21)
 
-**Fixed PDB row group format:**
-1. Row groups are always 36 bytes (16 offsets × 2 bytes + flags + unknown)
-2. Offsets stored in slot order: slot 15 first, slot 0 last
-3. Unused offset slots filled with 0x0000
-4. Fixed in `write_row_groups()` and `row_group_bytes()`
+**Fixed track info not displaying (CRITICAL):**
 
-**Fixed Tracks table pointer:**
-- `last_page` was incorrectly pointing to empty_candidate page (51)
-- Changed to point to actual last data page (2)
-- Fixed in TABLE_LAYOUTS constant
+The issue was missing string fields in the track row. The reference export has all 21 string fields with unique offsets, but we were only setting 5 of them.
 
-**Fixed empty exports:**
-- Added code to write blank data page when no tracks exist
-- Previously skipped data page entirely for empty playlists
+1. **Added all 21 track row strings** (`src/pdb/writer.rs`):
+   - String 2: "2" (sample depth indicator)
+   - String 3: "\x01" (flag byte)
+   - String 7: "ON" (autoload_hotcues - important for XDJ)
+   - String 10: date_added (YYYY-MM-DD format)
+   - Plus existing: analyze_path, analyze_date, title, filename, file_path
 
-### Current Issue: BPM Not Displaying on XDJ-XZ
+2. **Fixed file path structure** (`src/export/organizer.rs`):
+   - Changed from flat `Contents/filename` to `Contents/Artist/Album/filename`
+   - Added `sanitize_path_component()` for filesystem-safe names
+   - Now matches Rekordbox's organization exactly
 
-**What we've implemented:**
-1. ✅ BPM detection using `aubio-rs` + `symphonia` (correct values detected)
-2. ✅ Tempo field in PDB track row at offset 0x38-0x3B (BPM × 100, little-endian)
-3. ✅ PQTZ beatgrid section in ANLZ .DAT files (big-endian, correct format per Deep Symmetry docs)
-4. ✅ PVBR section in ANLZ .DAT files
-5. ✅ PPTH path with UTF-16BE encoding and NUL terminator
-6. ✅ `analyze_path` string (index 14) pointing to ANLZ file
-7. ✅ `analyze_date` string (index 15) set to current date
+3. **Updated pipeline** (`src/export/pipeline.rs`):
+   - Pass artist/album to `music_file_path()` for proper organization
 
-**Verified correct in hex dumps:**
-- PDB tempo: `b136 0000` = 0x000036b1 = 14001 = 140.01 BPM ✓
-- PQTZ header: magic, len_header=24, unknown2=0x00800000 ✓
-- PQTZ beats: tempo=0x36b1, times incrementing correctly ✓
-- ANLZ path matches actual file location ✓
-
-**What we've tried that didn't help:**
-- Adding PVBR section to ANLZ
-- Adding NUL terminator to PPTH path
-- Setting analyze_date string
-- Browsing from PLAYLIST view (not FOLDER)
-- Loading track onto deck
-
-**Unknown factors:**
-- The `bitmask` field at offset 0x04-0x07 in track row (currently 0x0700) - meaning undocumented
-- Unknown fields in PMAI header after file_length
-- Possible additional ANLZ sections required (PCOB cue list?)
-- Possible firmware-specific requirements for XDJ-XZ
-
-**Next steps to investigate:**
-1. Compare against a real Rekordbox export with BPM (need actual Rekordbox software)
-2. Try adding empty PCOB (cue list) section
-3. Research XDJ-XZ specific requirements
-4. Check if waveform sections (PWAV/PWV2) are required for BPM display
+**Key insight:** Each string field needs its own offset in the string offset array, even if pointing to an empty string. The XDJ appears to use these offsets to locate track metadata.
 
 ### Current Limitations (remaining Phase 2 features)
-- **BPM display**: Detection works but XDJ doesn't show it (investigation ongoing)
+- **BPM display**: Detection works, value written to PDB, but XDJ display TBD
 - **Waveforms**: Not implemented (PWAV, PWV2, PWV3, etc.)
 - **Key detection**: Not implemented
 - **Album artwork**: Not extracted/displayed
