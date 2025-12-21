@@ -2,20 +2,38 @@
 
 This document describes the phased implementation approach for the Rhythmbox → Pioneer USB exporter.
 
-## Current Status (2025-12-18)
+## Current Status (2025-12-20)
 
 **Phase:** Phase 1 COMPLETE + Phase 2.1 IN PROGRESS (BPM detection implemented but not displaying)
-**Status:** ⚠️ BPM detection works, data is written correctly, but XDJ-XZ does not display BPM
+**Status:** ✅ PDB validation passes with rekordcrate, ready for hardware testing
 
 ### What Works
-- XDJ-XZ recognizes USB and displays playlists
-- Tracks load and play correctly
-- Artist/Album/Title metadata displays properly
-- Accented characters (UTF-16LE encoding) display correctly
-- Multi-page track tables (tested with 45+ tracks across 4 pages)
-- **BPM detection** via aubio-rs (detects correct tempo values)
-- **PQTZ beatgrid** written to ANLZ .DAT files
-- **Tempo field** written to PDB track table (offset 0x38-0x3B)
+- ✅ XDJ-XZ recognizes USB and displays playlists
+- ✅ Tracks load and play correctly
+- ✅ Artist/Album/Title metadata displays properly
+- ✅ Accented characters (UTF-16LE encoding) display correctly
+- ✅ Multi-page track tables (tested with 45+ tracks across 4 pages)
+- ✅ **BPM detection** via aubio-rs (detects correct tempo values)
+- ✅ **PQTZ beatgrid** written to ANLZ .DAT files
+- ✅ **Tempo field** written to PDB track table (offset 0x38-0x3B)
+- ✅ **rekordcrate validation** passes for all exports
+
+### Recent Fixes (2025-12-20)
+
+**Fixed PDB row group format:**
+1. Row groups are always 36 bytes (16 offsets × 2 bytes + flags + unknown)
+2. Offsets stored in slot order: slot 15 first, slot 0 last
+3. Unused offset slots filled with 0x0000
+4. Fixed in `write_row_groups()` and `row_group_bytes()`
+
+**Fixed Tracks table pointer:**
+- `last_page` was incorrectly pointing to empty_candidate page (51)
+- Changed to point to actual last data page (2)
+- Fixed in TABLE_LAYOUTS constant
+
+**Fixed empty exports:**
+- Added code to write blank data page when no tracks exist
+- Previously skipped data page entirely for empty playlists
 
 ### Current Issue: BPM Not Displaying on XDJ-XZ
 
@@ -80,9 +98,18 @@ Two tables require exact byte-level compatibility:
 
 #### Track Page Allocation
 - ~12 tracks per page (conservative estimate due to variable row size)
-- Reference pages: 2, 51 (used first)
-- Additional pages allocated starting at page 56
-- Empty candidate page at 55
+- Header page: 1
+- Data page: 2 (first data page, contains track rows)
+- Empty candidate page: 51
+- Additional pages allocated starting at page 56 if needed
+
+#### Row Group Format (Critical)
+Row groups are stored at the end of each data page, growing backwards:
+- Each group is **always 36 bytes**: 16 offsets (32 bytes) + flags (2 bytes) + unknown (2 bytes)
+- Offsets stored in reverse slot order: slot 15 first, slot 0 last
+- Unused offset slots filled with 0x0000
+- Flags bitmask: bit N set = row N is present
+- Unknown field: typically mirrors the highest set bit in flags
 
 #### String Encoding (DeviceSQL)
 ```rust
@@ -388,40 +415,6 @@ verify_after_export = true
 ### Long-term (Phase 4)
 8. **GUI Application** - User-friendly interface
 9. **Binary Distribution** - Easy installation
-10. **Other library sources** - iTunes, Traktor, etc.
-
----
-
-## License Considerations
-
-### Phase 2 Library Licenses
-
-| Library | License | Bundling Impact |
-|---------|---------|-----------------|
-| `symphonia` | MPL-2.0 | Safe to bundle |
-| `dasp` | MIT/Apache | Safe to bundle |
-| `rustfft` | MIT/Apache | Safe to bundle |
-| `lofty` | MIT/Apache | Safe to bundle |
-| `image` | MIT | Safe to bundle |
-| `rubato` | MIT | Safe to bundle |
-| `aubio-rs` | GPL-3.0 | **Requires GPL for binary** |
-| `libkeyfinder` | GPL-3.0+ | **Requires GPL for binary** |
-
-### Options for GPL-Free Distribution
-
-1. **Accept GPL** - Distribute under GPL-3.0 (most straightforward)
-2. **External analyzers** - Ship GPL tools as separate binaries, call via subprocess
-3. **Optional features** - Make GPL dependencies optional at compile time
-4. **Alternative algorithms** - Use permissively-licensed alternatives (if quality sufficient)
-
-### Recommendation
-
-For a DJ tool, GPL is generally acceptable since:
-- Target users are end-users, not developers embedding the library
-- Mixxx (popular open-source DJ software) uses GPL
-- The analysis quality of aubio/libkeyfinder is well-proven
-
-If AGPL libraries (Essentia) are needed, use as external subprocess to avoid license propagation.
 
 ---
 
@@ -485,9 +478,15 @@ cargo test --test '*'     # Integration tests
 ```
 
 ### Hardware Testing
-Always test exports on actual XDJ hardware - validation with rekordcrate is necessary but not sufficient.
+- Always test exports on actual XDJ hardware - validation with rekordcrate is necessary but not sufficient.
+- You export directly to /run/media/julien/USB (if unavailable, ask the user to re-insert the thumbdrive)
+
+## Don't get sidetracked
+- ANLZ are NOT necessary to get a working export. A reference export without ANLZ files (manual deletion for testing) provides on the XDJ : full track info (title, artist, key, bpm, rating, date, tiny artwork) but no waveform. 
+- Current status: We can filter by playlist, artist, etc. but we don't have any track info displayed (artist, title, genre, bpm, etc.). The issue is wider than BPM. Don't get sidetracked by the BPM issue. You are to get as close to the single-track reference export as possible, or use any relevant means to fix the issue.
 
 ### Debug Tips
 - Use `xxd` to compare binary files byte-by-byte
-- Compare against reference export from actual Rekordbox
+- Compare against reference export from actual Rekordbox (we have a multi playlist reference, and single playlist/single track reference export, that matches Rhythmbox's "REKORDBOX3" playlist). Reference exports are 100% tested and valid. Produced by the proprietary Rekordbox software. Don't doubt them.  
 - Page 34 (Columns) and page 36 (HistoryPlaylists) are XDJ-sensitive
+- Write your own debugging scripts, to iterate on your own quickly and freely.

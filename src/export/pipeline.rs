@@ -131,7 +131,7 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
 
             // Copy audio file to USB
             if self.config.copy_audio {
-                let dest_path = self.organizer.music_file_path(&track.file_path);
+                let dest_path = self.organizer.music_file_path(&track.file_path, &track.artist, &track.album);
                 self.organizer
                     .copy_music_file(&track.file_path, &dest_path)
                     .with_context(|| format!("Failed to copy track: {:?}", track.file_path))?;
@@ -160,7 +160,7 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
                 .context("Missing analysis result for track")?;
 
             // Compute the relative audio path for the PPTH section and ANLZ path hash
-            let music_path = self.organizer.music_file_path(&track.file_path);
+            let music_path = self.organizer.music_file_path(&track.file_path, &track.artist, &track.album);
             let relative_music_path = self
                 .organizer
                 .relative_music_path(&music_path)
@@ -193,7 +193,7 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
         // Build track metadata with file paths and ANLZ paths
         let mut track_metadata = Vec::new();
         for track in library.tracks() {
-            let music_path = self.organizer.music_file_path(&track.file_path);
+            let music_path = self.organizer.music_file_path(&track.file_path, &track.artist, &track.album);
             let relative_music_path = self
                 .organizer
                 .relative_music_path(&music_path)

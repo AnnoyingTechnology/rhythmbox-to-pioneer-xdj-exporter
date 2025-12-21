@@ -74,11 +74,13 @@ pub fn parse_database(path: &Path) -> Result<Vec<Track>> {
                             }
                         }
                         "date" => {
-                            // Rhythmbox date field needs conversion
+                            // Rhythmbox uses days since year 1 AD (proleptic Gregorian)
+                            // Formula: year ≈ (date * 400) / 146097 + 1
                             if let Ok(date) = text.parse::<u32>() {
-                                // Convert Julian date to year (approximate)
                                 if date > 0 {
-                                    entry.year = Some(1970 + (date / 365));
+                                    // More accurate year calculation
+                                    let year = ((date as u64 * 400) / 146097 + 1) as u32;
+                                    entry.year = Some(year);
                                 }
                             }
                         }

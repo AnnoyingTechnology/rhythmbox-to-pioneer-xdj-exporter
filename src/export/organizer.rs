@@ -21,6 +21,20 @@ pub struct UsbOrganizer {
     contents_dir: PathBuf,
 }
 
+/// Sanitize a string for use as a path component (artist, album names)
+fn sanitize_path_component(s: &str) -> String {
+    // Replace filesystem-unsafe characters with underscores
+    // Keep alphanumeric, spaces, hyphens, and common punctuation
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Compute ANLZ path components from a file path
 /// Returns (p_value, hash_value) for the hierarchical path structure
 /// Path format: /PIONEER/USBANLZ/P{XXX}/{XXXXXXXX}/ANLZ0000.{ext}
@@ -166,16 +180,19 @@ impl UsbOrganizer {
 
     /// Get the destination path for a music file
     ///
-    /// Preserves some directory structure to avoid name conflicts
-    pub fn music_file_path(&self, original_path: &Path) -> PathBuf {
+    /// Organizes files into Contents/Artist/Album/filename structure like Rekordbox does
+    pub fn music_file_path(&self, original_path: &Path, artist: &str, album: &str) -> PathBuf {
         // Get the filename
         let filename = original_path
             .file_name()
             .unwrap_or_else(|| original_path.as_os_str());
 
-        // For now, put all music files in a flat Contents/ directory
-        // Future: could organize by artist/album like rekordbox does
-        self.contents_dir.join(filename)
+        // Organize by Artist/Album like Rekordbox does
+        // Sanitize artist and album names for filesystem safety
+        let safe_artist = sanitize_path_component(artist);
+        let safe_album = sanitize_path_component(album);
+
+        self.contents_dir.join(safe_artist).join(safe_album).join(filename)
     }
 
     /// Copy a music file to the USB

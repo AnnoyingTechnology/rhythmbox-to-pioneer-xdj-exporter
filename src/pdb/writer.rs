@@ -1483,54 +1483,97 @@ fn write_tracks_table(
 
         // Build strings and calculate offsets
         // String indices per Deep Symmetry documentation:
-        // 0: isrc, 1: lyricist, 2-4: unknown, 5: message, 6: publish_track_info,
-        // 7: autoload_hotcues, 8-9: unknown, 10: date_added, 11: release_date,
-        // 12: mix_name, 13: unknown, 14: analyze_path, 15: analyze_date,
-        // 16: comment, 17: title, 18: unknown, 19: filename, 20: file_path
+        // 0: isrc, 1: lyricist, 2: unknown2 (sample depth?), 3: unknown3 (flag),
+        // 4: unknown4, 5: message, 6: publish_track_info, 7: autoload_hotcues,
+        // 8-9: unknown, 10: date_added, 11: release_date, 12: mix_name, 13: unknown,
+        // 14: analyze_path, 15: analyze_date, 16: comment, 17: title,
+        // 18: unknown, 19: filename, 20: file_path
         let mut string_data = Vec::new();
 
-        // CRITICAL: Start with an empty DeviceSQL string (0x03 = ShortASCII, length 0)
-        // All unused string offsets will point to this empty string at the start
-        let empty_string_offset = string_data_start as u16;
-        string_data.push(0x03); // Empty DeviceSQL string: ShortASCII with length ((0+1)<<1)|1 = 3
+        // Initialize string offsets - we'll set each one as we add strings
+        // Each string gets its own position, matching reference pattern
+        let mut string_offsets: Vec<u16> = vec![0; 21];
 
-        // Initialize all offsets to point to the empty string
-        let mut string_offsets: Vec<u16> = vec![empty_string_offset; 21];
+        // Helper to add a string and record its offset
+        let mut add_string = |index: usize, data: &[u8], offsets: &mut Vec<u16>, buffer: &mut Vec<u8>| {
+            offsets[index] = (string_data_start + buffer.len()) as u16;
+            buffer.extend_from_slice(data);
+        };
+
+        // String 0: isrc (empty)
+        add_string(0, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 1: lyricist (empty)
+        add_string(1, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 2: unknown2 - sample depth indicator "2" (matches reference)
+        add_string(2, &encode_device_sql("2"), &mut string_offsets, &mut string_data);
+
+        // String 3: unknown3 - flag byte 0x01 (matches reference pattern)
+        // This is encoded as DeviceSQL short string with 1 byte content
+        add_string(3, &[0x05, 0x01], &mut string_offsets, &mut string_data);
+
+        // String 4: unknown4 (empty)
+        add_string(4, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 5: message (empty)
+        add_string(5, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 6: publish_track_info (empty)
+        add_string(6, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 7: autoload_hotcues - "ON" (critical for proper XDJ behavior)
+        add_string(7, &encode_device_sql("ON"), &mut string_offsets, &mut string_data);
+
+        // String 8: unknown8 (empty)
+        add_string(8, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 9: unknown9 (empty)
+        add_string(9, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 10: date_added (format: YYYY-MM-DD)
+        let date_added = chrono::Local::now().format("%Y-%m-%d").to_string();
+        add_string(10, &encode_device_sql(&date_added), &mut string_offsets, &mut string_data);
+
+        // String 11: release_date (empty)
+        add_string(11, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 12: mix_name (empty)
+        add_string(12, &[0x03], &mut string_offsets, &mut string_data);
+
+        // String 13: unknown13 (empty)
+        add_string(13, &[0x03], &mut string_offsets, &mut string_data);
 
         // String 14: analyze_path (CRITICAL for BPM display)
         let anlz_path_str = track_meta.anlz_path.to_string_lossy();
-        if !anlz_path_str.is_empty() {
-            string_offsets[14] = (string_data_start + string_data.len()) as u16;
-            string_data.extend_from_slice(&encode_device_sql(&anlz_path_str));
-        }
+        add_string(14, &encode_device_sql(&anlz_path_str), &mut string_offsets, &mut string_data);
 
         // String 15: analyze_date (CRITICAL for BPM display - format: YYYY-MM-DD)
-        // Use current date to indicate track has been analyzed
         let analyze_date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        string_offsets[15] = (string_data_start + string_data.len()) as u16;
-        string_data.extend_from_slice(&encode_device_sql(&analyze_date));
+        add_string(15, &encode_device_sql(&analyze_date), &mut string_offsets, &mut string_data);
+
+        // String 16: comment
+        if let Some(ref comment) = track.comment {
+            add_string(16, &encode_device_sql(comment), &mut string_offsets, &mut string_data);
+        } else {
+            add_string(16, &[0x03], &mut string_offsets, &mut string_data);
+        }
 
         // String 17: title (CRITICAL)
-        if !track.title.is_empty() {
-            string_offsets[17] = (string_data_start + string_data.len()) as u16;
-            string_data.extend_from_slice(&encode_device_sql(&track.title));
-        }
+        add_string(17, &encode_device_sql(&track.title), &mut string_offsets, &mut string_data);
+
+        // String 18: unknown18 (empty)
+        add_string(18, &[0x03], &mut string_offsets, &mut string_data);
 
         // String 19: filename
         let filename = track_meta.file_path.file_name()
             .map(|f| f.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if !filename.is_empty() {
-            string_offsets[19] = (string_data_start + string_data.len()) as u16;
-            string_data.extend_from_slice(&encode_device_sql(&filename));
-        }
+        add_string(19, &encode_device_sql(&filename), &mut string_offsets, &mut string_data);
 
         // String 20: file_path (CRITICAL)
         let file_path_str = track_meta.file_path.to_string_lossy();
-        if !file_path_str.is_empty() {
-            string_offsets[20] = (string_data_start + string_data.len()) as u16;
-            string_data.extend_from_slice(&encode_device_sql(&file_path_str));
-        }
+        add_string(20, &encode_device_sql(&file_path_str), &mut string_offsets, &mut string_data);
 
         // Write string offset array
         for offset in &string_offsets {
