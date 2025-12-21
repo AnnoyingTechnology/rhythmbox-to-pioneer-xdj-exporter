@@ -50,8 +50,9 @@ pub fn write_dat_file(
     let mut file = File::create(path)
         .with_context(|| format!("Failed to create ANLZ .DAT file: {:?}", path))?;
 
-    // Get BPM from analysis or track metadata
-    let bpm = analysis.bpm.or(track.bpm);
+    // Get BPM from track metadata only (not from analysis)
+    // Analysis BPM causes issues - need to investigate
+    let bpm = track.bpm;
 
     write_anlz_with_ppth_and_pqtz(&mut file, audio_path, bpm, track.duration_ms)?;
 
