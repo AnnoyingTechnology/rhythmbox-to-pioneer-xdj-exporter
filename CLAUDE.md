@@ -73,6 +73,11 @@ Dependencies:
   - Needs: actual Rekordbox export with many artists to compare row group structure
 - **Duplicate tracks with case-different paths** - FAT32 case-insensitivity causes overwrites
   - e.g., "Album Name" vs "album name" → same folder on USB
+- **Performance is poor for large exports** - ~10 minutes for 84 tracks
+  - 30GB RAM usage during analysis
+  - All CPU cores maxed (31 threads on 32-core system)
+  - stratum-dsp analysis is the bottleneck
+  - Consider: limiting concurrent analyses, streaming decode, or caching analyzed results
 
 ### Phase 2.1
 - [ ] Rhythmbox track rating (stars) to PDB rating
