@@ -109,7 +109,8 @@ fn encode_path_utf16_be(path: &str) -> Vec<u8> {
     result
 }
 
-/// Write an ANLZ file with PMAI header, PVBR, PPTH section, and optional PQTZ beatgrid
+/// Write an ANLZ file with PMAI header, PPTH section, PVBR, and optional PQTZ beatgrid
+/// Section order must be: PPTH → PVBR → PQTZ (matching Rekordbox reference)
 fn write_anlz_with_ppth_and_pqtz(
     file: &mut File,
     audio_path: &str,
@@ -121,6 +122,9 @@ fn write_anlz_with_ppth_and_pqtz(
     let path_len = path_utf16.len() as u32;
 
     // Calculate PPTH section size
+    // Reference shows: len_tag = header (16) + path data (no separate path_len field in len_tag)
+    // But we need to write path_len as a 4-byte field before the path
+    // Total section: header(12) + len_path(4) + path_data = header_part(16) + path_data
     let ppth_section_len = PPTH_HEADER_SIZE + path_len;
 
     // Calculate PQTZ section if BPM is available
@@ -132,8 +136,9 @@ fn write_anlz_with_ppth_and_pqtz(
         (0, None)
     };
 
-    // Total file size: PMAI + PVBR + PPTH + PQTZ
-    let total_file_size = PMAI_HEADER_SIZE + PVBR_TOTAL_SIZE + ppth_section_len + pqtz_section_len;
+    // Total file size: PMAI + PPTH + PVBR + PQTZ
+    // Section order MUST be: PPTH first, then PVBR, then PQTZ
+    let total_file_size = PMAI_HEADER_SIZE + ppth_section_len + PVBR_TOTAL_SIZE + pqtz_section_len;
 
     // --- PMAI Header (28 bytes) ---
     file.write_all(PMAI_MAGIC)?;
@@ -145,20 +150,20 @@ fn write_anlz_with_ppth_and_pqtz(
     file.write_all(&0x00010000u32.to_be_bytes())?; // Offset 20: 0x00010000
     file.write_all(&0u32.to_be_bytes())?; // Offset 24: 0x00000000
 
-    // --- PVBR Section (VBR index - required for proper playback) ---
+    // --- PPTH Section (MUST come first after header per reference) ---
+    file.write_all(PPTH_MAGIC)?;
+    file.write_all(&PPTH_HEADER_SIZE.to_be_bytes())?; // len_header = 16
+    file.write_all(&ppth_section_len.to_be_bytes())?; // len_tag (total section size)
+    file.write_all(&path_len.to_be_bytes())?; // len_path (just the path bytes)
+    file.write_all(&path_utf16)?;
+
+    // --- PVBR Section (VBR index - comes after PPTH) ---
     file.write_all(PVBR_MAGIC)?;
     file.write_all(&PVBR_HEADER_SIZE.to_be_bytes())?; // len_header
     file.write_all(&PVBR_TOTAL_SIZE.to_be_bytes())?; // len_tag
     file.write_all(&0u32.to_be_bytes())?; // unknown data (4 bytes)
 
-    // --- PPTH Section ---
-    file.write_all(PPTH_MAGIC)?;
-    file.write_all(&PPTH_HEADER_SIZE.to_be_bytes())?;
-    file.write_all(&ppth_section_len.to_be_bytes())?;
-    file.write_all(&path_len.to_be_bytes())?;
-    file.write_all(&path_utf16)?;
-
-    // --- PQTZ Section (beatgrid) ---
+    // --- PQTZ Section (beatgrid - comes last) ---
     if let Some(entries) = beat_entries {
         let num_beats = entries.len() as u32;
         let pqtz_total_len = PQTZ_HEADER_SIZE + (num_beats * PQTZ_BEAT_ENTRY_SIZE);

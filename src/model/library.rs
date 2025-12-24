@@ -35,9 +35,15 @@ impl Library {
         self.tracks.get(id)
     }
 
-    /// Get all tracks
+    /// Get all tracks in sorted order (by artist, then title)
+    /// This ensures consistent output for byte-for-byte reproducible exports
     pub fn tracks(&self) -> impl Iterator<Item = &Track> {
-        self.tracks.values()
+        let mut tracks: Vec<_> = self.tracks.values().collect();
+        tracks.sort_by(|a, b| {
+            a.artist.cmp(&b.artist)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        tracks.into_iter()
     }
 
     /// Get all playlists
