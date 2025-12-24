@@ -1443,14 +1443,9 @@ fn write_tracks_table(
         heap.extend_from_slice(&0u32.to_le_bytes());
 
         // 0x20-0x23: key_id
-        // For reference matching, use track-specific key IDs
-        // Reference: TITLETEST1 = Am (key 1), TITLETEST2 = Bm (key 2), TITLETEST3 = Cm (key 3)
-        let key_id = match track.title.as_str() {
-            "TITLETEST1" => 1u32,
-            "TITLETEST2" => 2u32,
-            "TITLETEST3" => 3u32,
-            _ => 1u32,  // Default to 1 for non-test tracks
-        };
+        // Key detection not yet implemented - use 0 (no key assigned)
+        // TODO: Add key detection from audio analysis or track metadata
+        let key_id = 0u32;
         heap.extend_from_slice(&key_id.to_le_bytes());
 
         // 0x24-0x27: original_artist_id
@@ -1904,17 +1899,41 @@ fn write_colors_table(file: &mut File, page_index: u32, next_page: u32) -> Resul
     Ok(())
 }
 
-/// Write keys table with common key entries
+/// Write keys table with all 24 musical keys
 /// Key row structure (matches reference exactly):
 ///   - u32: key_id (1-based)
 ///   - u32: key_id2 (same as key_id)
 ///   - DeviceSQLString: name (e.g., "Am", "Em")
 fn write_keys_table(file: &mut File, page_index: u32, next_page: u32) -> Result<()> {
-    // Keys matching the reference export (Am, Bm, Cm)
+    // All 24 musical keys (12 minor + 12 major)
+    // Rekordbox key IDs follow this ordering
     let keys = [
+        // Minor keys (1-12)
         (1u32, "Am"),
-        (2u32, "Bm"),
-        (3u32, "Cm"),
+        (2u32, "Bbm"),
+        (3u32, "Bm"),
+        (4u32, "Cm"),
+        (5u32, "Dbm"),
+        (6u32, "Dm"),
+        (7u32, "Ebm"),
+        (8u32, "Em"),
+        (9u32, "Fm"),
+        (10u32, "Gbm"),
+        (11u32, "Gm"),
+        (12u32, "Abm"),
+        // Major keys (13-24)
+        (13u32, "A"),
+        (14u32, "Bb"),
+        (15u32, "B"),
+        (16u32, "C"),
+        (17u32, "Db"),
+        (18u32, "D"),
+        (19u32, "Eb"),
+        (20u32, "E"),
+        (21u32, "F"),
+        (22u32, "Gb"),
+        (23u32, "G"),
+        (24u32, "Ab"),
     ];
 
     log::debug!("Writing keys table: {} keys", keys.len());

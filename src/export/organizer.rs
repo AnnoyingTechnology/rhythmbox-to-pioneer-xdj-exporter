@@ -35,35 +35,10 @@ fn sanitize_path_component(s: &str) -> String {
         .to_string()
 }
 
-/// Reference track data for byte-perfect exports matching examples/reference/
-/// Maps track title to (p_value, hash_value/track_id) from the reference export
-/// These values come from rekordbox's internal ID generation
-const REFERENCE_TRACK_DATA: &[(&str, u16, u32)] = &[
-    // TITLETEST1.mp3 - Track ID 120014 (0x0001D4CE)
-    ("TITLETEST1", 0x04E, 0x0001D4CE),
-    // TITLETEST2.flac - Track ID 143027 (0x00022EB3)
-    ("TITLETEST2", 0x039, 0x00022EB3),
-    // TITLETEST3.mp3 - Track ID 67638 (0x00010836)
-    ("TITLETEST3", 0x042, 0x00010836),
-];
-
-/// Compute ANLZ path components from a file path
+/// Compute ANLZ path components from a file path using FNV-1a hash
 /// Returns (p_value, hash_value) for the hierarchical path structure
 /// Path format: /PIONEER/USBANLZ/P{XXX}/{XXXXXXXX}/ANLZ0000.{ext}
 fn compute_anlz_path_hash(file_path: &str) -> (u16, u32) {
-    // First, check if this is a reference test track
-    // Extract filename from path
-    let filename = file_path.rsplit('/').next().unwrap_or(file_path);
-    let basename = filename.split('.').next().unwrap_or(filename);
-
-    // Check if it matches a reference track
-    for (title, p_value, hash_value) in REFERENCE_TRACK_DATA {
-        if basename == *title {
-            return (*p_value, *hash_value);
-        }
-    }
-
-    // Fall back to FNV-1a hash for non-reference tracks
     let bytes = file_path.as_bytes();
 
     // Compute a 32-bit hash using FNV-1a algorithm
