@@ -2,27 +2,92 @@
 
 ## Current Status (2025-12-24)
 
-**Phase:** BPM Detection WORKING!
-**Status:** Full export pipeline with BPM detection. Works on XDJ-XZ.
+**Phase:** Audio Analysis COMPLETE
+**Status:** Full export pipeline with parallel BPM + key detection. Works on XDJ-XZ.
 
 ---
 
-## BPM Detection (Completed)
+## Audio Analysis (Completed)
+
+**Powered by stratum-dsp** - unified BPM + key detection in a single pass.
 
 Features:
-- **Range-constrained detection** (default 70-170 BPM) - handles octave errors
-- **Skips tracks with existing BPM** from ID3/metadata
-- **Optional caching** to source files (`--cache-bpm` flag)
+- **Parallel processing** - uses rayon with (cores - 1) threads for multi-threaded analysis
+  - 8 tracks in ~3 seconds (release build, 31 threads on 32-core system)
+  - Use `cargo run --release` for best performance
+- **BPM detection** with range constraint (default 70-170 BPM) - handles octave errors
+- **Key detection** using chroma-based Krumhansl-Kessler template matching
+- **Single audio decode** per track - efficient, no duplicate processing
+- **Skips tracks with existing metadata** from ID3/Vorbis tags
+- **Optional caching** to source files (`--cache-bpm`, `--cache-key`)
   - Works for FLAC files
-  - MP3 skipped due to lofty library TBPM issue (TODO: fix with mutagen fallback)
+  - MP3 skipped due to lofty library issues with TBPM/TKEY frames
 
 CLI options:
 ```bash
-cargo run -- --output /path/to/usb --playlist "MyPlaylist"           # BPM detection enabled
-cargo run -- --output /path/to/usb --playlist "MyPlaylist" --no-bpm  # Skip detection
-cargo run -- --output /path/to/usb --playlist "MyPlaylist" --cache-bpm  # Cache to files
-cargo run -- --output /path/to/usb --min-bpm 100 --max-bpm 180       # Custom range
+cargo run -- --output /path/to/usb --playlist "MyPlaylist"           # BPM + key detection enabled
+cargo run -- --output /path/to/usb --playlist "MyPlaylist" --no-bpm  # Skip BPM detection only
+cargo run -- --output /path/to/usb --playlist "MyPlaylist" --no-key  # Skip key detection only
+cargo run -- --output /path/to/usb --playlist "MyPlaylist" --no-bpm --no-key  # Stub mode (fast)
+cargo run -- --output /path/to/usb --playlist "MyPlaylist" --cache-bpm --cache-key  # Cache to files
+cargo run -- --output /path/to/usb --min-bpm 100 --max-bpm 180       # Custom BPM range
 ```
+
+Dependencies:
+- `stratum-dsp` - BPM + key detection (pure Rust, ~87% BPM accuracy, ~72% key accuracy)
+- `symphonia` - audio decoding (MP3, FLAC, AAC, WAV, OGG)
+- `lofty` - metadata read/write
+- `rayon` - parallel processing
+
+---
+
+## Roadmap
+
+### Phase 2 - Complete
+- [x] BPM detection with range normalization
+- [x] Key detection with correct Rekordbox ID mapping
+- [x] Parallel track analysis (31 threads, ~5 tracks/sec)
+- [x] Smart/automatic playlist support (genre, duration, artist filters)
+- [x] Metadata caching (FLAC only, MP3 TODO)
+- [x] Key ID fix (chromatic order from A: minor 1-12, major 13-24)
+- [x] Filename sanitization for FAT32 (quotes, colons, etc. → underscore)
+
+### Known Issues
+- **Some tracks show blank artist on XDJ** - Artist table structure may differ from reference
+  - Artist data IS in the PDB (verified via hex dump)
+  - artist_id values ARE correctly assigned to track rows
+  - Issue appears to be with how XDJ reads the artist table rows
+  - Attempted fix (16-byte header) caused 100% regression - reverted
+  - Needs more investigation of reference artist row structure
+- **Duplicate tracks with case-different paths** - FAT32 case-insensitivity causes overwrites
+  - e.g., "Album Name" vs "album name" → same folder on USB
+
+### Phase 2.1
+- [ ] Rhythmbox track rating (stars) to PDB rating
+
+### Phase 3 - Waveforms (Next)
+- [ ] Waveform preview (PWV3 - monochrome, ~400 samples)
+- [ ] Waveform detail (PWV5 - monochrome, higher resolution)
+- [ ] Color waveform preview (PWV4 - RGB frequency bands)
+- [ ] Color waveform detail (PWV6 - RGB high-res)
+
+Libraries to use:
+- `rustfft` / `realfft` - FFT for frequency analysis
+- `dasp` - RMS/peak extraction per window
+
+### Phase 4 - Artwork
+- [ ] Extract embedded artwork from audio files (lofty)
+- [ ] Resize to Pioneer format (80x80, 56x56)
+- [ ] Write to USB artwork directory
+
+Libraries to use:
+- `lofty` - extract APIC/picture from tags
+- `image` - resize + JPEG encode
+
+### Phase 5 - Beatgrid (Low Priority)
+- [ ] Beat timestamp detection (stratum-dsp has BeatGrid)
+- [ ] PQTZ section in ANLZ files
+- [ ] Quantized beat positions
 
 ---
 
@@ -44,9 +109,9 @@ Removed hardcoded values that were only needed for byte-perfect reference matchi
 1. **ANLZ paths** - Removed `REFERENCE_TRACK_DATA` hardcoding in `organizer.rs`
    - Now uses FNV-1a hash for all tracks (was hardcoded for TITLETEST1/2/3)
 
-2. **Key IDs** - Removed track title matching in `pdb/writer.rs`
-   - Now sets `key_id=0` for all tracks (no key assigned)
-   - TODO: Add key detection from audio analysis
+2. **Key IDs** - Now uses detected key from stratum-dsp
+   - Was: hardcoded key IDs for test tracks
+   - Now: dynamically sets key_id from audio analysis
 
 3. **Keys table** - Expanded from 3 to 24 musical keys
    - Was: Am, Bm, Cm only
@@ -87,7 +152,8 @@ This is counterintuitive because History tables seem like optional tracking data
 3. **Track row padding** - 0x158 bytes between track rows (reference alignment)
 4. **Entity row padding** - Artists: 28 bytes, Albums: 40 bytes per row
 5. **Page header flags** - 0x60, 0x00 at bytes 0x19-0x1A for most data pages
-6. ~~**Track key_id** - Correct key IDs (1=Am, 2=Bm, 3=Cm) for test tracks~~ **(REMOVED - now 0 for all)**
+6. **Track key_id** - Now dynamically set from stratum-dsp key detection
+   - Key ID mapping fixed to match Keys table (chromatic order from A, minor 1-12, major 13-24)
 7. **Album artist_id** - Set to 0 (not actual artist ID) to match reference
 8. **Empty tables** - Labels and Artwork are header-only (no data pages)
 9. **File header** - `next_unused_page=53`, `sequence=31` to match reference
@@ -137,5 +203,61 @@ We should export the 3 REKORDBOX{n} playlist, as they correspond to the referenc
 When implementing new features, remember:
 - The History tables are NOT optional - empty tables = USB not recognized
 - The reference History tables work for ANY number of tracks (no need to generate dynamically)
-- Key detection from audio analysis would improve the export quality
 - BPM detection is working (use without --no-bpm flag)
+- Key detection is working (use without --no-key flag)
+
+---
+
+## Library Candidates for Future Features
+
+* **`aubio-rs` (aubio bindings)** — tempo tracking + beat detection; can give both **BPM** and **beat timestamps** (useful later for beatgrid). ([docs.rs][1])
+* **QM Vamp plugins (C/C++ via Vamp host)** — includes a **beat tracker/tempo estimator**; good fallback if aubio accuracy isn’t enough for your genres. ([GitHub][2])
+* **Essentia (C++ / subprocess/FFI)** — strong rhythm tooling, but **AGPL** (often only practical as an optional external analyzer). ([records.sigmm.org][3])
+
+## Key detection (high)
+
+* **`libkeyfinder` (C++ / FFI or `keyfinder-cli`)** — widely used (e.g., Mixxx KeyFinder option), straightforward “one key per track”; **GPLv3+** (license is the main tradeoff). ([GitHub][4])
+* **QM Vamp plugins (key estimator)** — alternate key detection path; also gives you a consistent DSP “suite” alongside beat tracking. ([GitHub][2])
+* **Essentia `Key` / `KeyExtractor`** — high-quality algorithms, but **AGPL**; again best as an optional external backend. ([essentia.upf.edu][5])
+
+## Waveform (high)
+
+* **Decode pipeline:** **`symphonia`** for pure-Rust demux+decode to PCM (good default for a portable CLI). ([crates.io][6])
+* **Amplitude/peaks/RMS:** **`dasp`** (and its `rms`/signal/peak features) for windowing + RMS/peak extraction. ([docs.rs][7])
+* **Colored waveforms (band energy):** **`rustfft` + `realfft`** for fast real FFT; compute low/mid/high band energy per window for PWV2/PWV4-style RGB. ([crates.io][8])
+* **Turnkey external generator (fallback):** **BBC `audiowaveform`** CLI to generate waveform peak data fast from many codecs; then map/convert into Rekordbox ANLZ payloads. ([GitHub][9])
+
+## Artwork from audio files (medium)
+
+* **`lofty`** — read/write tags across many formats and extract embedded pictures (ID3 APIC, Vorbis/FLAC pictures, MP4, etc.). ([docs.rs][10])
+* **`id3`** — if you want a narrow MP3-only path (TBPM/TKEY/APIC), keep it as a lightweight alternative. ([crates.io][11])
+* (Typical companion) **`image`** crate for resize + JPEG encode once you extract bytes (no single “DJ artwork” crate; this is the usual building block).
+
+## Beatgrid (low)
+
+* **From aubio:** reuse **`aubio-rs` Tempo** beat timestamps → quantize to grid + write PQTZ. ([docs.rs][12])
+* **From QM Vamp plugins:** beat tracker output as an alternative source of beat times. ([GitHub][2])
+* **From Essentia:** beat tracking algorithms exist but (again) **AGPL** considerations. ([mtg.github.io][13])
+
+## Other turnkey wins (worth adding in Phase 2)
+
+* **Resampling to a known rate before analysis:** `rubato` (keeps aubio/key detection more stable across sources). ([docs.rs][14])
+* **If codec coverage becomes painful:** consider **GStreamer Rust bindings** as an optional “decode backend” for exotic formats. ([gstreamer.freedesktop.org][15])
+
+If you tell me your license constraints (GPL/AGPL acceptable or not), I can narrow these to the “safe-to-bundle” shortlist immediately.
+
+[1]: https://docs.rs/aubio-rs?utm_source=chatgpt.com "aubio_rs - Rust"
+[2]: https://github.com/c4dm/qm-vamp-plugins?utm_source=chatgpt.com "c4dm/qm-vamp-plugins"
+[3]: https://records.sigmm.org/2014/03/20/essentia-an-open-source-library-for-audio-analysis/?utm_source=chatgpt.com "ESSENTIA: an open source library for audio analysis"
+[4]: https://github.com/mixxxdj/libkeyfinder?utm_source=chatgpt.com "mixxxdj/libkeyfinder: Musical key detection for digital audio, ..."
+[5]: https://essentia.upf.edu/reference/std_KeyExtractor.html?utm_source=chatgpt.com "KeyExtractor — Essentia 2.1-beta6-dev documentation"
+[6]: https://crates.io/crates/symphonia?utm_source=chatgpt.com "symphonia - crates.io: Rust Package Registry"
+[7]: https://docs.rs/dasp?utm_source=chatgpt.com "dasp - Rust"
+[8]: https://crates.io/crates/rustfft?utm_source=chatgpt.com "rustfft - crates.io: Rust Package Registry"
+[9]: https://github.com/bbc/audiowaveform?utm_source=chatgpt.com "bbc/audiowaveform: C++ program to generate waveform ..."
+[10]: https://docs.rs/lofty?utm_source=chatgpt.com "lofty - Rust"
+[11]: https://crates.io/crates/id3?utm_source=chatgpt.com "id3 - crates.io: Rust Package Registry"
+[12]: https://docs.rs/aubio-rs/latest/aubio_rs/struct.Tempo.html?utm_source=chatgpt.com "Tempo in aubio_rs - Rust"
+[13]: https://mtg.github.io/essentia.js/docs/api/EssentiaExtractor.html?utm_source=chatgpt.com "EssentiaExtractor"
+[14]: https://docs.rs/rubato?utm_source=chatgpt.com "rubato - Rust"
+[15]: https://gstreamer.freedesktop.org/documentation/rust/git/docs/gstreamer_audio/index.html?utm_source=chatgpt.com "gstreamer_audio - Rust"

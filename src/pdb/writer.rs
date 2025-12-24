@@ -1443,9 +1443,13 @@ fn write_tracks_table(
         heap.extend_from_slice(&0u32.to_le_bytes());
 
         // 0x20-0x23: key_id
-        // Key detection not yet implemented - use 0 (no key assigned)
-        // TODO: Add key detection from audio analysis or track metadata
-        let key_id = 0u32;
+        // Use detected key from analysis, or track metadata, or 0 (no key)
+        let key_id = track_meta
+            .analysis
+            .key
+            .or(track.key)
+            .map(|k| k.to_rekordbox_id())
+            .unwrap_or(0);
         heap.extend_from_slice(&key_id.to_le_bytes());
 
         // 0x24-0x27: original_artist_id

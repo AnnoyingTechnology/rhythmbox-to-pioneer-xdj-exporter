@@ -180,17 +180,19 @@ impl UsbOrganizer {
     ///
     /// Organizes files into Contents/Artist/Album/filename structure like Rekordbox does
     pub fn music_file_path(&self, original_path: &Path, artist: &str, album: &str) -> PathBuf {
-        // Get the filename
+        // Get the filename and sanitize for FAT32/exFAT compatibility
         let filename = original_path
             .file_name()
-            .unwrap_or_else(|| original_path.as_os_str());
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let safe_filename = sanitize_path_component(&filename);
 
         // Organize by Artist/Album like Rekordbox does
         // Sanitize artist and album names for filesystem safety
         let safe_artist = sanitize_path_component(artist);
         let safe_album = sanitize_path_component(album);
 
-        self.contents_dir.join(safe_artist).join(safe_album).join(filename)
+        self.contents_dir.join(safe_artist).join(safe_album).join(safe_filename)
     }
 
     /// Copy a music file to the USB

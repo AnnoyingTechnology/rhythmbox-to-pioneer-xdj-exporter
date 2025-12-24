@@ -78,36 +78,37 @@ pub enum MusicalKey {
 
 impl MusicalKey {
     /// Convert to Rekordbox key encoding
-    /// Based on the key table format in Pioneer PDB files
+    /// Must match the Keys table in PDB (chromatic order starting from A)
+    /// Minor keys: 1-12, Major keys: 13-24
     pub fn to_rekordbox_id(&self) -> u32 {
         match self {
-            // Major keys (Ionian mode)
-            MusicalKey::CMajor => 1,
-            MusicalKey::DbMajor => 2,
-            MusicalKey::DMajor => 3,
-            MusicalKey::EbMajor => 4,
-            MusicalKey::EMajor => 5,
-            MusicalKey::FMajor => 6,
-            MusicalKey::GbMajor => 7,
-            MusicalKey::GMajor => 8,
-            MusicalKey::AbMajor => 9,
-            MusicalKey::AMajor => 10,
-            MusicalKey::BbMajor => 11,
-            MusicalKey::BMajor => 12,
+            // Minor keys (chromatic from A) - IDs 1-12
+            MusicalKey::AMinor => 1,
+            MusicalKey::BbMinor => 2,
+            MusicalKey::BMinor => 3,
+            MusicalKey::CMinor => 4,
+            MusicalKey::CsMinor => 5,
+            MusicalKey::DMinor => 6,
+            MusicalKey::EbMinor => 7,
+            MusicalKey::EMinor => 8,
+            MusicalKey::FMinor => 9,
+            MusicalKey::FsMinor => 10,
+            MusicalKey::GMinor => 11,
+            MusicalKey::AbMinor => 12,
 
-            // Minor keys (Aeolian mode)
-            MusicalKey::CMinor => 13,
-            MusicalKey::CsMinor => 14,
-            MusicalKey::DMinor => 15,
-            MusicalKey::EbMinor => 16,
-            MusicalKey::EMinor => 17,
-            MusicalKey::FMinor => 18,
-            MusicalKey::FsMinor => 19,
-            MusicalKey::GMinor => 20,
-            MusicalKey::AbMinor => 21,
-            MusicalKey::AMinor => 22,
-            MusicalKey::BbMinor => 23,
-            MusicalKey::BMinor => 24,
+            // Major keys (chromatic from A) - IDs 13-24
+            MusicalKey::AMajor => 13,
+            MusicalKey::BbMajor => 14,
+            MusicalKey::BMajor => 15,
+            MusicalKey::CMajor => 16,
+            MusicalKey::DbMajor => 17,
+            MusicalKey::DMajor => 18,
+            MusicalKey::EbMajor => 19,
+            MusicalKey::EMajor => 20,
+            MusicalKey::FMajor => 21,
+            MusicalKey::GbMajor => 22,
+            MusicalKey::GMajor => 23,
+            MusicalKey::AbMajor => 24,
         }
     }
 

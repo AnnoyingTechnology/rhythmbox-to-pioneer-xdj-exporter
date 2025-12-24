@@ -40,11 +40,14 @@ shellexpand = "3.1"
 # Date/time for analyze_date field
 chrono = "0.4"
 
-# Audio analysis (Phase 2)
+# Audio analysis (Phase 2) - stratum-dsp for BPM + key, symphonia for decoding
 symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "wav", "ogg", "vorbis"] }
-aubio-rs = { version = "0.2", features = ["pkg-config"] }
+stratum-dsp = "1.0"
 
-# Tag reading/writing for BPM caching
+# Parallel processing
+rayon = "1.10"
+
+# Tag reading/writing for metadata caching
 lofty = "0.22"
 
 [dev-dependencies]

@@ -3,6 +3,7 @@ use clap::Parser;
 use pioneer_exporter::analysis::{RealAnalyzer, StubAnalyzer};
 use pioneer_exporter::validation::validate_export;
 use pioneer_exporter::{ExportConfig, ExportPipeline};
+use rayon;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -56,6 +57,14 @@ struct Args {
     /// Cache detected BPM to source file's ID3/metadata tags
     #[arg(long)]
     cache_bpm: bool,
+
+    /// Skip key detection (faster export, no key info)
+    #[arg(long)]
+    no_key: bool,
+
+    /// Cache detected key to source file's metadata tags
+    #[arg(long)]
+    cache_key: bool,
 }
 
 fn main() -> Result<()> {
@@ -65,10 +74,20 @@ fn main() -> Result<()> {
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
-    if args.no_bpm {
+    // Configure rayon thread pool (use all cores - 1, minimum 1)
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1))
+        .unwrap_or(4);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .ok(); // Ignore if already initialized
+    log::info!("Using {} threads for parallel analysis", num_threads);
+
+    if args.no_bpm && args.no_key {
         log::info!("Pioneer Exporter - Phase 1 (Stub Analysis)");
     } else {
-        log::info!("Pioneer Exporter - Phase 2 (BPM Analysis)");
+        log::info!("Pioneer Exporter - Phase 2 (BPM + Key Analysis)");
     }
     log::info!("===========================================");
 
@@ -110,20 +129,28 @@ fn main() -> Result<()> {
         config = config.with_playlists(args.playlists_filter);
     }
 
-    // Create export pipeline - use RealAnalyzer for BPM detection or StubAnalyzer if disabled
-    if args.no_bpm {
+    // Create export pipeline - use RealAnalyzer for detection or StubAnalyzer if all disabled
+    if args.no_bpm && args.no_key {
         let analyzer = StubAnalyzer::new();
         let pipeline = ExportPipeline::new(config, analyzer)?;
         pipeline.export(&library)?;
     } else {
+        let cache_enabled = args.cache_bpm || args.cache_key;
         let analyzer = RealAnalyzer::new()
             .with_bpm_range(args.min_bpm, args.max_bpm)
-            .with_id3_caching(args.cache_bpm);
+            .with_id3_caching(cache_enabled)
+            .with_bpm_detection(!args.no_bpm)
+            .with_key_detection(!args.no_key);
 
-        if args.cache_bpm {
-            log::info!("BPM caching enabled - detected BPM will be written to source files");
+        if !args.no_bpm {
+            log::info!("BPM detection range: {}-{} BPM", args.min_bpm, args.max_bpm);
         }
-        log::info!("BPM detection range: {}-{} BPM", args.min_bpm, args.max_bpm);
+        if !args.no_key {
+            log::info!("Key detection enabled");
+        }
+        if cache_enabled {
+            log::info!("Caching enabled - detected values will be written to source files");
+        }
 
         let pipeline = ExportPipeline::new(config, analyzer)?;
         pipeline.export(&library)?;

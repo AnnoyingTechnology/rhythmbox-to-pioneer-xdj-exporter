@@ -5,7 +5,8 @@ use anyhow::Result;
 use std::path::Path;
 
 /// Audio analyzer trait - allows swapping between stub and real implementations
-pub trait AudioAnalyzer {
+/// Requires Sync + Send for parallel processing
+pub trait AudioAnalyzer: Sync + Send {
     /// Analyze an audio file and return all analysis data
     /// Takes the track context to check for existing metadata (e.g., BPM from ID3)
     fn analyze(&self, audio_path: &Path, track: &Track) -> Result<AnalysisResult>;

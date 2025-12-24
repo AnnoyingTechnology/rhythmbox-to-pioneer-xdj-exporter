@@ -109,27 +109,40 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
         Ok((filtered_lib, track_ids))
     }
 
-    /// Process all tracks: analyze and copy audio files
+    /// Process all tracks: analyze in parallel, then copy audio files
     fn process_tracks(&self, library: &Library) -> Result<HashMap<String, AnalysisResult>> {
-        log::info!("Processing tracks...");
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tracks: Vec<_> = library.tracks().collect();
+        let total = tracks.len();
+        let counter = AtomicUsize::new(0);
+
+        log::info!("Analyzing {} tracks in parallel...", total);
+
+        // Analyze tracks in parallel
+        let analysis_results: Vec<_> = tracks
+            .par_iter()
+            .map(|track| {
+                let i = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                log::info!("[{}/{}] Analyzing: {} - {}", i, total, track.artist, track.title);
+
+                let analysis = self
+                    .analyzer
+                    .analyze(&track.file_path, track)
+                    .with_context(|| format!("Failed to analyze track: {:?}", track.file_path));
+
+                (track, analysis)
+            })
+            .collect();
+
+        log::info!("Analysis complete, copying files...");
+
+        // Build results and copy files sequentially (I/O bound)
         let mut results = HashMap::new();
+        for (track, analysis) in analysis_results {
+            let analysis = analysis?;
 
-        for (i, track) in library.tracks().enumerate() {
-            log::info!(
-                "[{}/{}] Processing: {} - {}",
-                i + 1,
-                library.track_count(),
-                track.artist,
-                track.title
-            );
-
-            // Analyze the track (pass track for metadata like existing BPM)
-            let analysis = self
-                .analyzer
-                .analyze(&track.file_path, track)
-                .with_context(|| format!("Failed to analyze track: {:?}", track.file_path))?;
-
-            // Copy audio file to USB
             if self.config.copy_audio {
                 let dest_path = self.organizer.music_file_path(&track.file_path, &track.artist, &track.album);
                 self.organizer
