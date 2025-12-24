@@ -2,8 +2,19 @@
 
 ## Current Status (2025-12-24)
 
-**Phase:** Phase 1 cleanup complete - preparing for dynamic exports
-**Status:** Removed hardcoded test track values. Export still works on XDJ-XZ.
+**Phase:** Arbitrary playlist export WORKING!
+**Status:** Can export any Rhythmbox playlist to XDJ-XZ. Tested with 4 and 10 track playlists.
+
+---
+
+## Key Discovery: History Tables
+
+The History tables (pages 36, 38, 40) are **required** for XDJ to recognize the USB, but they work as **static reference data** - they don't need to match the actual exported tracks!
+
+- **Empty History tables** = USB not recognized at all
+- **Reference History tables** = Works with ANY number of tracks (tested: 3, 4, 10)
+
+The XDJ appears to need valid History table structure for initialization, but doesn't use them to limit which tracks are accessible.
 
 ---
 
@@ -22,12 +33,11 @@ Removed hardcoded values that were only needed for byte-perfect reference matchi
    - Was: Am, Bm, Cm only
    - Now: All 12 minor + 12 major keys
 
-**Remaining hardcoded values (Phase 2 - required for track info display):**
+**Static reference data (kept as-is, works for all exports):**
 - `reference_history.bin` (page 40) - History table data
 - `reference_history_entries.bin` (page 38) - HistoryEntries table data
 - `reference_history_playlists.bin` (page 36) - HistoryPlaylists table data
-
-These History tables still reference track IDs 1-3 from the reference export. To export arbitrary playlists, we need to generate these tables dynamically.
+- `reference_columns.bin` (page 34) - Column definitions
 
 ---
 
@@ -106,7 +116,7 @@ We should export the 3 REKORDBOX{n} playlist, as they correspond to the referenc
 ## Future Considerations
 
 When implementing new features, remember:
-- The History tables are NOT optional for track info display
-- When adding tracks dynamically, the History tables will need to be generated properly (not just copied from reference)
-- The HistoryEntries table appears to link tracks to playlist history
-- The History table appears to track playback/import history
+- The History tables are NOT optional - empty tables = USB not recognized
+- The reference History tables work for ANY number of tracks (no need to generate dynamically)
+- Key detection from audio analysis would improve the export quality
+- BPM detection is working (use without --no-bpm flag)

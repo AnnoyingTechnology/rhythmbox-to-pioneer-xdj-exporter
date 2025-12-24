@@ -419,6 +419,7 @@ pub fn write_pdb(
                 write_columns_table(&mut file, &entities.columns, layout.data_pages[0], layout.empty_candidate)?;
             }
             TableType::History => {
+                // History table - REQUIRED for XDJ to recognize USB
                 seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
@@ -443,7 +444,7 @@ pub fn write_pdb(
                 file.write_all(REFERENCE_HISTORY_PAGE)?;
             }
             TableType::HistoryEntries => {
-                // Use reference page data for HistoryEntries
+                // HistoryEntries table - REQUIRED for XDJ to recognize USB
                 seek_to_page(&mut file, layout.header_page)?;
                 let next_page = layout.data_pages.get(0).copied().unwrap_or(layout.empty_candidate);
                 write_page_header(
@@ -472,7 +473,7 @@ pub fn write_pdb(
                 }
             }
             TableType::HistoryPlaylists => {
-                // Use reference page data for HistoryPlaylists - XDJ is sensitive to this table
+                // HistoryPlaylists table - REQUIRED for XDJ to recognize USB
                 seek_to_page(&mut file, layout.header_page)?;
                 let next_page = layout.data_pages.get(0).copied().unwrap_or(layout.empty_candidate);
                 write_page_header(
@@ -495,7 +496,6 @@ pub fn write_pdb(
                 write_header_page_content(&mut file, layout.header_page, first_data_page, layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
-                // Write reference history playlists data page
                 if let Some(&data_page) = layout.data_pages.get(0) {
                     seek_to_page(&mut file, data_page)?;
                     file.write_all(REFERENCE_HISTORY_PLAYLISTS_PAGE)?;
