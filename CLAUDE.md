@@ -2,8 +2,8 @@
 
 ## Current Status (2025-12-24)
 
-**Phase:** Audio Analysis COMPLETE
-**Status:** Full export pipeline with parallel BPM + key detection. Works on XDJ-XZ.
+**Phase:** Waveforms (NOT WORKING)
+**Status:** Full export pipeline with BPM, key, rating. Waveform code written but not displaying on XDJ-XZ.
 
 ---
 
@@ -73,15 +73,36 @@ Dependencies:
 - [x] FAT32 path component sanitization (truncation to 200 chars)
 - [x] `--max-parallel` CLI option to limit concurrent analyses (memory optimization)
 
-### Phase 3 - Waveforms (Next)
-- [ ] Waveform preview (PWV3 - monochrome, ~400 samples)
-- [ ] Waveform detail (PWV5 - monochrome, higher resolution)
-- [ ] Color waveform preview (PWV4 - RGB frequency bands)
-- [ ] Color waveform detail (PWV6 - RGB high-res)
+### Phase 3 - Waveforms (NOT WORKING)
+- [x] PWAV waveform preview (400 bytes, monochrome) - .DAT file
+- [x] PWV2 tiny preview (100 bytes) - .DAT file
+- [x] PWV3 waveform detail (150 entries/sec, monochrome) - .EXT file
+- [x] PWV5 color waveform detail (150 entries/sec, 2 bytes/entry) - .EXT file
+- [ ] PWV4 color preview (1200 columns, RGB) - TODO: requires FFT for frequency bands
+- [ ] PWV6/PWV7 3-band waveforms (CDJ-3000) - not needed for XDJ-XZ
 
-Libraries to use:
-- `rustfft` / `realfft` - FFT for frequency analysis
-- `dasp` - RMS/peak extraction per window
+**STATUS: NOT WORKING ON XDJ-XZ**
+- No waveform visible in needle search
+- No waveform visible on jogwheel display
+- No waveform visible on main screen
+- Data is being written to ANLZ files but XDJ doesn't display it
+
+Possible issues to investigate:
+- Section order in ANLZ files may be wrong
+- Header values may be incorrect
+- Missing required sections (PCOB/PCO2 structure?)
+- Byte encoding may be wrong (bit order, endianness)
+- Need to compare byte-for-byte with working Rekordbox export
+
+Waveform encoding (as implemented):
+- PWAV/PWV3: height (5 bits) | whiteness (3 bits) - based on peak amplitude and crest factor
+- PWV2: height (4 bits) - simple peak amplitude
+- PWV5: RGB (3 bits each) | height (5 bits) | unused (2 bits) - white/blue gradient based on intensity
+
+Implementation:
+- Uses symphonia to decode audio to mono samples
+- Calculates RMS and peak per time window
+- Height from peak amplitude, whiteness/color from intensity
 
 ### Phase 4 - Artwork
 - [ ] Extract embedded artwork from audio files (lofty)

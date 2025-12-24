@@ -1,8 +1,8 @@
 //! ANLZ file writer implementation
 //!
-//! Writes ANLZ files with PPTH and PQTZ (beatgrid) sections.
+//! Writes ANLZ files with PPTH, PQTZ (beatgrid), and waveform sections.
 
-use crate::analysis::AnalysisResult;
+use crate::analysis::{AnalysisResult, WaveformData};
 use crate::model::Track;
 use anyhow::{Context, Result};
 use std::fs::{self, File};
@@ -15,6 +15,18 @@ const PMAI_MAGIC: &[u8; 4] = b"PMAI";
 const PPTH_MAGIC: &[u8; 4] = b"PPTH";
 /// PQTZ magic number (beatgrid section)
 const PQTZ_MAGIC: &[u8; 4] = b"PQTZ";
+/// PWAV magic number (waveform preview)
+const PWAV_MAGIC: &[u8; 4] = b"PWAV";
+/// PWV2 magic number (tiny waveform preview)
+const PWV2_MAGIC: &[u8; 4] = b"PWV2";
+/// PWV3 magic number (waveform detail)
+const PWV3_MAGIC: &[u8; 4] = b"PWV3";
+/// PWV5 magic number (color waveform detail)
+const PWV5_MAGIC: &[u8; 4] = b"PWV5";
+/// PCOB magic number (cue points)
+const PCOB_MAGIC: &[u8; 4] = b"PCOB";
+/// PCO2 magic number (cue points v2)
+const PCO2_MAGIC: &[u8; 4] = b"PCO2";
 /// PMAI header size (28 bytes)
 const PMAI_HEADER_SIZE: u32 = 28;
 /// PPTH header size (16 bytes)
@@ -27,16 +39,26 @@ const PQTZ_BEAT_ENTRY_SIZE: u32 = 8;
 const PVBR_MAGIC: &[u8; 4] = b"PVBR";
 /// PVBR header size (16 bytes)
 const PVBR_HEADER_SIZE: u32 = 16;
-/// PVBR total size (20 bytes - header + 4 bytes of data)
-const PVBR_TOTAL_SIZE: u32 = 20;
+/// PVBR total size (1620 bytes - header + VBR index data)
+const PVBR_TOTAL_SIZE: u32 = 1620;
+/// PWAV header size (20 bytes)
+const PWAV_HEADER_SIZE: u32 = 20;
+/// PWV2 header size (20 bytes)
+const PWV2_HEADER_SIZE: u32 = 20;
+/// PWV3 header size (24 bytes)
+const PWV3_HEADER_SIZE: u32 = 24;
+/// PWV5 header size (24 bytes)
+const PWV5_HEADER_SIZE: u32 = 24;
+/// PCOB header size (24 bytes)
+const PCOB_HEADER_SIZE: u32 = 24;
 
 /// Write a .DAT analysis file
 ///
-/// Contains PMAI header + PPTH section + PQTZ beatgrid (if BPM available)
+/// Contains: PMAI header + PPTH + PVBR + PQTZ + PWAV + PWV2 + PCOB sections
 pub fn write_dat_file(
     path: &Path,
     track: &Track,
-    _analysis: &AnalysisResult,
+    analysis: &AnalysisResult,
     audio_path: &str,
 ) -> Result<()> {
     log::debug!("Writing ANLZ .DAT file: {:?}", path);
@@ -51,23 +73,21 @@ pub fn write_dat_file(
         .with_context(|| format!("Failed to create ANLZ .DAT file: {:?}", path))?;
 
     // Get BPM from track metadata only (not from analysis)
-    // Analysis BPM causes issues - need to investigate
     let bpm = track.bpm;
 
-    write_anlz_with_ppth_and_pqtz(&mut file, audio_path, bpm, track.duration_ms)?;
+    write_dat_sections(&mut file, audio_path, bpm, track.duration_ms, &analysis.waveforms)?;
 
-    log::debug!("ANLZ .DAT file written with PPTH and PQTZ sections");
+    log::debug!("ANLZ .DAT file written with waveform sections");
     Ok(())
 }
 
 /// Write a .EXT analysis file
 ///
-/// Phase 1: PMAI header + PPTH section
-/// Phase 2: Add color waveform sections
+/// Contains: PMAI header + PPTH + PWV3 + PCOB + PCO2 + PWV5 sections
 pub fn write_ext_file(
     path: &Path,
     _track: &Track,
-    _analysis: &AnalysisResult,
+    analysis: &AnalysisResult,
     audio_path: &str,
 ) -> Result<()> {
     log::debug!("Writing ANLZ .EXT file: {:?}", path);
@@ -81,9 +101,9 @@ pub fn write_ext_file(
     let mut file = File::create(path)
         .with_context(|| format!("Failed to create ANLZ .EXT file: {:?}", path))?;
 
-    write_anlz_with_ppth(&mut file, audio_path)?;
+    write_ext_sections(&mut file, audio_path, &analysis.waveforms)?;
 
-    log::debug!("ANLZ .EXT file written with PPTH section");
+    log::debug!("ANLZ .EXT file written with waveform sections");
     Ok(())
 }
 
@@ -109,25 +129,22 @@ fn encode_path_utf16_be(path: &str) -> Vec<u8> {
     result
 }
 
-/// Write an ANLZ file with PMAI header, PPTH section, PVBR, and optional PQTZ beatgrid
-/// Section order must be: PPTH → PVBR → PQTZ (matching Rekordbox reference)
-fn write_anlz_with_ppth_and_pqtz(
+/// Write .DAT file sections: PPTH → PVBR → PQTZ → PWAV → PWV2 → PCOB × 2
+fn write_dat_sections(
     file: &mut File,
     audio_path: &str,
     bpm: Option<f32>,
     duration_ms: u32,
+    waveforms: &WaveformData,
 ) -> Result<()> {
     // Encode the path as UTF-16 big-endian (includes NUL terminator)
     let path_utf16 = encode_path_utf16_be(audio_path);
     let path_len = path_utf16.len() as u32;
 
-    // Calculate PPTH section size
-    // Reference shows: len_tag = header (16) + path data (no separate path_len field in len_tag)
-    // But we need to write path_len as a 4-byte field before the path
-    // Total section: header(12) + len_path(4) + path_data = header_part(16) + path_data
+    // Calculate section sizes
     let ppth_section_len = PPTH_HEADER_SIZE + path_len;
 
-    // Calculate PQTZ section if BPM is available
+    // PQTZ section if BPM is available
     let (pqtz_section_len, beat_entries) = if let Some(bpm_value) = bpm {
         let entries = generate_beat_entries(bpm_value, duration_ms);
         let len = PQTZ_HEADER_SIZE + (entries.len() as u32 * PQTZ_BEAT_ENTRY_SIZE);
@@ -136,46 +153,69 @@ fn write_anlz_with_ppth_and_pqtz(
         (0, None)
     };
 
-    // Total file size: PMAI + PPTH + PVBR + PQTZ
-    // Section order MUST be: PPTH first, then PVBR, then PQTZ
-    let total_file_size = PMAI_HEADER_SIZE + ppth_section_len + PVBR_TOTAL_SIZE + pqtz_section_len;
+    // PWAV section (400 bytes of waveform data)
+    let pwav_entries = if waveforms.preview.len() == 400 {
+        waveforms.preview.len() as u32
+    } else {
+        400 // Default to 400 if not exactly right
+    };
+    let pwav_section_len = PWAV_HEADER_SIZE + pwav_entries;
+
+    // PWV2 section (100 bytes of tiny preview)
+    let pwv2_entries = if waveforms.tiny_preview.len() == 100 {
+        waveforms.tiny_preview.len() as u32
+    } else {
+        100
+    };
+    let pwv2_section_len = PWV2_HEADER_SIZE + pwv2_entries;
+
+    // PCOB sections (2 of them, each 24 bytes)
+    let pcob_section_len = PCOB_HEADER_SIZE;
+
+    // Total file size
+    let total_file_size = PMAI_HEADER_SIZE
+        + ppth_section_len
+        + PVBR_TOTAL_SIZE
+        + pqtz_section_len
+        + pwav_section_len
+        + pwv2_section_len
+        + pcob_section_len * 2;
 
     // --- PMAI Header (28 bytes) ---
     file.write_all(PMAI_MAGIC)?;
     file.write_all(&PMAI_HEADER_SIZE.to_be_bytes())?;
     file.write_all(&total_file_size.to_be_bytes())?;
-    // Remaining header bytes (16 bytes) - match reference export values
-    file.write_all(&1u32.to_be_bytes())?; // Offset 12: 0x00000001
-    file.write_all(&0x00010000u32.to_be_bytes())?; // Offset 16: 0x00010000
-    file.write_all(&0x00010000u32.to_be_bytes())?; // Offset 20: 0x00010000
-    file.write_all(&0u32.to_be_bytes())?; // Offset 24: 0x00000000
+    file.write_all(&1u32.to_be_bytes())?; // Offset 12
+    file.write_all(&0x00010000u32.to_be_bytes())?; // Offset 16
+    file.write_all(&0x00010000u32.to_be_bytes())?; // Offset 20
+    file.write_all(&0u32.to_be_bytes())?; // Offset 24
 
-    // --- PPTH Section (MUST come first after header per reference) ---
+    // --- PPTH Section ---
     file.write_all(PPTH_MAGIC)?;
-    file.write_all(&PPTH_HEADER_SIZE.to_be_bytes())?; // len_header = 16
-    file.write_all(&ppth_section_len.to_be_bytes())?; // len_tag (total section size)
-    file.write_all(&path_len.to_be_bytes())?; // len_path (just the path bytes)
+    file.write_all(&PPTH_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&ppth_section_len.to_be_bytes())?;
+    file.write_all(&path_len.to_be_bytes())?;
     file.write_all(&path_utf16)?;
 
-    // --- PVBR Section (VBR index - comes after PPTH) ---
+    // --- PVBR Section (VBR index - 1620 bytes total with padding) ---
     file.write_all(PVBR_MAGIC)?;
-    file.write_all(&PVBR_HEADER_SIZE.to_be_bytes())?; // len_header
-    file.write_all(&PVBR_TOTAL_SIZE.to_be_bytes())?; // len_tag
-    file.write_all(&0u32.to_be_bytes())?; // unknown data (4 bytes)
+    file.write_all(&PVBR_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&PVBR_TOTAL_SIZE.to_be_bytes())?;
+    // Write VBR index data (1604 bytes of zeros after 16-byte header)
+    file.write_all(&vec![0u8; (PVBR_TOTAL_SIZE - PVBR_HEADER_SIZE) as usize])?;
 
-    // --- PQTZ Section (beatgrid - comes last) ---
+    // --- PQTZ Section (beatgrid) ---
     if let Some(entries) = beat_entries {
         let num_beats = entries.len() as u32;
         let pqtz_total_len = PQTZ_HEADER_SIZE + (num_beats * PQTZ_BEAT_ENTRY_SIZE);
 
         file.write_all(PQTZ_MAGIC)?;
-        file.write_all(&PQTZ_HEADER_SIZE.to_be_bytes())?; // len_header
-        file.write_all(&pqtz_total_len.to_be_bytes())?; // len_tag
+        file.write_all(&PQTZ_HEADER_SIZE.to_be_bytes())?;
+        file.write_all(&pqtz_total_len.to_be_bytes())?;
         file.write_all(&0u32.to_be_bytes())?; // unknown1
-        file.write_all(&0x00800000u32.to_be_bytes())?; // unknown2 (always 0x00800000)
-        file.write_all(&num_beats.to_be_bytes())?; // len_beats
+        file.write_all(&0x00800000u32.to_be_bytes())?; // unknown2
+        file.write_all(&num_beats.to_be_bytes())?;
 
-        // Write beat entries
         for entry in entries {
             file.write_all(&entry.beat_number.to_be_bytes())?;
             file.write_all(&entry.tempo.to_be_bytes())?;
@@ -185,12 +225,148 @@ fn write_anlz_with_ppth_and_pqtz(
         log::debug!("PQTZ beatgrid written: {} beats", num_beats);
     }
 
+    // --- PWAV Section (waveform preview) ---
+    file.write_all(PWAV_MAGIC)?;
+    file.write_all(&PWAV_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&pwav_section_len.to_be_bytes())?;
+    file.write_all(&pwav_entries.to_be_bytes())?; // len_entries
+    file.write_all(&0x00010000u32.to_be_bytes())?; // unknown (always 0x00010000)
+    // Write waveform data (400 bytes)
+    if waveforms.preview.len() == 400 {
+        file.write_all(&waveforms.preview)?;
+    } else {
+        // Fallback: generate flat waveform
+        file.write_all(&vec![0xa2u8; 400])?;
+    }
+
+    // --- PWV2 Section (tiny waveform preview) ---
+    file.write_all(PWV2_MAGIC)?;
+    file.write_all(&PWV2_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&pwv2_section_len.to_be_bytes())?;
+    file.write_all(&pwv2_entries.to_be_bytes())?; // len_entries
+    file.write_all(&0x00010000u32.to_be_bytes())?; // unknown
+    // Write tiny preview data (100 bytes)
+    if waveforms.tiny_preview.len() == 100 {
+        file.write_all(&waveforms.tiny_preview)?;
+    } else {
+        file.write_all(&vec![0x01u8; 100])?;
+    }
+
+    // --- PCOB Sections (cue points - 2 empty sections) ---
+    // PCOB 1: hot cues
+    file.write_all(PCOB_MAGIC)?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?; // len_tag = header only
+    file.write_all(&1u32.to_be_bytes())?; // entry_count = 1 (type)
+    file.write_all(&0u32.to_be_bytes())?; // unknown
+    file.write_all(&0xffffffffu32.to_be_bytes())?; // memory_count = -1
+
+    // PCOB 2: memory cues
+    file.write_all(PCOB_MAGIC)?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?; // entry_count = 0
+    file.write_all(&0u32.to_be_bytes())?;
+    file.write_all(&0xffffffffu32.to_be_bytes())?;
+
     Ok(())
 }
 
-/// Write an ANLZ file with PMAI header and PPTH section only (for .EXT files)
-fn write_anlz_with_ppth(file: &mut File, audio_path: &str) -> Result<()> {
-    write_anlz_with_ppth_and_pqtz(file, audio_path, None, 0)
+/// Write .EXT file sections: PPTH → PWV3 → PCOB × 2 → PCO2 × 2 → PWV5
+fn write_ext_sections(
+    file: &mut File,
+    audio_path: &str,
+    waveforms: &WaveformData,
+) -> Result<()> {
+    let path_utf16 = encode_path_utf16_be(audio_path);
+    let path_len = path_utf16.len() as u32;
+    let ppth_section_len = PPTH_HEADER_SIZE + path_len;
+
+    // PWV3 section (detail waveform, 1 byte per entry)
+    let pwv3_entries = waveforms.detail.len() as u32;
+    let pwv3_section_len = PWV3_HEADER_SIZE + pwv3_entries;
+
+    // PWV5 section (color detail, 2 bytes per entry)
+    let pwv5_entries = (waveforms.color_detail.len() / 2) as u32;
+    let pwv5_section_len = PWV5_HEADER_SIZE + (pwv5_entries * 2);
+
+    // Total file size
+    let total_file_size = PMAI_HEADER_SIZE
+        + ppth_section_len
+        + pwv3_section_len
+        + PCOB_HEADER_SIZE * 2  // PCOB sections
+        + 20 * 2                 // PCO2 sections (20 bytes each)
+        + pwv5_section_len;
+
+    // --- PMAI Header ---
+    file.write_all(PMAI_MAGIC)?;
+    file.write_all(&PMAI_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&total_file_size.to_be_bytes())?;
+    file.write_all(&1u32.to_be_bytes())?;
+    file.write_all(&0x00010000u32.to_be_bytes())?;
+    file.write_all(&0x00010000u32.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?;
+
+    // --- PPTH Section ---
+    file.write_all(PPTH_MAGIC)?;
+    file.write_all(&PPTH_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&ppth_section_len.to_be_bytes())?;
+    file.write_all(&path_len.to_be_bytes())?;
+    file.write_all(&path_utf16)?;
+
+    // --- PWV3 Section (detail waveform) ---
+    file.write_all(PWV3_MAGIC)?;
+    file.write_all(&PWV3_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&pwv3_section_len.to_be_bytes())?;
+    file.write_all(&1u32.to_be_bytes())?; // unknown1 (always 1)
+    file.write_all(&pwv3_entries.to_be_bytes())?; // len_entries
+    file.write_all(&150u16.to_be_bytes())?; // entries_per_second (0x0096)
+    file.write_all(&0u16.to_be_bytes())?; // unknown2
+    file.write_all(&waveforms.detail)?;
+
+    // --- PCOB Sections (cue points) ---
+    // PCOB 1
+    file.write_all(PCOB_MAGIC)?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&1u32.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?;
+    file.write_all(&0xffffffffu32.to_be_bytes())?;
+
+    // PCOB 2
+    file.write_all(PCOB_MAGIC)?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&PCOB_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?;
+    file.write_all(&0xffffffffu32.to_be_bytes())?;
+
+    // --- PCO2 Sections (extended cue points) ---
+    // PCO2 1
+    file.write_all(PCO2_MAGIC)?;
+    file.write_all(&20u32.to_be_bytes())?; // len_header = 20
+    file.write_all(&20u32.to_be_bytes())?; // len_tag = 20
+    file.write_all(&1u32.to_be_bytes())?; // unknown
+    file.write_all(&0u32.to_be_bytes())?;
+
+    // PCO2 2
+    file.write_all(PCO2_MAGIC)?;
+    file.write_all(&20u32.to_be_bytes())?;
+    file.write_all(&20u32.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?;
+
+    // --- PWV5 Section (color detail waveform) ---
+    file.write_all(PWV5_MAGIC)?;
+    file.write_all(&PWV5_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&pwv5_section_len.to_be_bytes())?;
+    file.write_all(&2u32.to_be_bytes())?; // unknown1 (always 2 = bytes per entry)
+    file.write_all(&pwv5_entries.to_be_bytes())?; // len_entries
+    file.write_all(&150u16.to_be_bytes())?; // entries_per_second
+    file.write_all(&0x0305u16.to_be_bytes())?; // unknown2 (observed value)
+    file.write_all(&waveforms.color_detail)?;
+
+    Ok(())
 }
 
 /// Beat entry for PQTZ section
@@ -222,5 +398,3 @@ fn generate_beat_entries(bpm: f32, duration_ms: u32) -> Vec<BeatEntry> {
 
     entries
 }
-
-// Phase 2 TODO: Waveform sections (PWAV, PWV2, PWV3, PWV4, PWV5)

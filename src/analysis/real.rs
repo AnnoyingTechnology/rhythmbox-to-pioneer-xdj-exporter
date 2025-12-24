@@ -1,10 +1,11 @@
 //! Real audio analyzer implementation for Phase 2
 //!
-//! Uses stratum-dsp for both BPM and key detection in a single pass.
-//! Other features (waveform) remain stubs for now.
+//! Uses stratum-dsp for BPM and key detection.
+//! Uses symphonia for waveform generation.
 
 use super::stratum::analyze_audio_file;
 use super::traits::{AnalysisResult, AudioAnalyzer, WaveformData};
+use super::waveform::generate_waveforms;
 use crate::model::{MusicalKey, Track};
 use anyhow::Result;
 use std::path::Path;
@@ -178,8 +179,14 @@ impl AudioAnalyzer for RealAnalyzer {
         // Phase 2 TODO: Beat grid
         let beatgrid = None;
 
-        // Phase 2 TODO: Waveform generation
-        let waveforms = WaveformData::minimal_stub();
+        // Generate waveforms
+        let waveforms = match generate_waveforms(audio_path, track.duration_ms) {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!("Waveform generation failed for {:?}: {}", audio_path, e);
+                WaveformData::minimal_stub()
+            }
+        };
 
         Ok(AnalysisResult {
             bpm,
