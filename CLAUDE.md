@@ -53,12 +53,24 @@ Dependencies:
 - [x] Filename sanitization for FAT32 (quotes, colons, etc. → underscore)
 
 ### Known Issues
-- **Some tracks show blank artist on XDJ** - Artist table structure may differ from reference
-  - Artist data IS in the PDB (verified via hex dump)
-  - artist_id values ARE correctly assigned to track rows
-  - Issue appears to be with how XDJ reads the artist table rows
-  - Attempted fix (16-byte header) caused 100% regression - reverted
-  - Needs more investigation of reference artist row structure
+- **Some tracks show blank artist on XDJ** - Root cause unknown, extensive investigation completed
+  - **Verified CORRECT:**
+    - Artist data IS in the PDB (verified via hex dump)
+    - artist_id values ARE correctly assigned to track rows (1-66 range, all valid)
+    - Artist row structure matches reference (8-byte header + 2-byte offset array + DeviceSQL string)
+    - DeviceSQL string encoding is correct (short ASCII format)
+    - Row offsets in footer are correctly variable-length
+    - Page header fields (num_rows_small, num_rows_large, free_size, used_size) are correct
+    - Multi-page track tables correctly chain (page 2 → 41 → 42 → ...)
+    - All 66 artists fit in single page (1935 bytes heap, 3876 available)
+  - **What's different from reference:**
+    - Reference has 3 artists (1 row group), our export has 66 artists (5 row groups)
+    - Reference has fixed-length rows (all "ARTISTTEST*" = 11 chars), ours are variable
+    - Reference has 3 tracks on 1 page, we have 84 tracks across multiple pages
+  - **Attempted fixes that failed:**
+    - 16-byte header modification → 100% regression (reverted)
+  - **Issue persists** - same artists missing regardless of changes tested
+  - Needs: actual Rekordbox export with many artists to compare row group structure
 - **Duplicate tracks with case-different paths** - FAT32 case-insensitivity causes overwrites
   - e.g., "Album Name" vs "album name" → same folder on USB
 
