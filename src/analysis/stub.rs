@@ -4,6 +4,7 @@
 //! This allows the export pipeline to work while we develop real analysis.
 
 use super::traits::{AnalysisResult, AudioAnalyzer, WaveformData};
+use crate::model::Track;
 use anyhow::Result;
 use std::path::Path;
 
@@ -23,12 +24,12 @@ impl Default for StubAnalyzer {
 }
 
 impl AudioAnalyzer for StubAnalyzer {
-    fn analyze(&self, audio_path: &Path) -> Result<AnalysisResult> {
+    fn analyze(&self, audio_path: &Path, track: &Track) -> Result<AnalysisResult> {
         log::debug!("Stub analysis for: {:?}", audio_path);
 
-        // Phase 1: Return empty analysis
+        // Use existing BPM from track metadata if available
         Ok(AnalysisResult {
-            bpm: None,
+            bpm: track.bpm,
             key: None,
             beatgrid: None,
             waveforms: WaveformData::minimal_stub(),

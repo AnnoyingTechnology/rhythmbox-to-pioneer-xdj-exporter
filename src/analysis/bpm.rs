@@ -23,9 +23,15 @@ pub struct BpmResult {
     pub confidence: f32,
 }
 
-/// Detect BPM from an audio file
+/// Detect BPM from an audio file with default range (no constraint)
 pub fn detect_bpm(path: &Path) -> Result<BpmResult> {
-    log::debug!("Detecting BPM for: {:?}", path);
+    detect_bpm_with_range(path, 0.0, 500.0)
+}
+
+/// Detect BPM from an audio file within a specified range
+/// The range helps avoid octave errors (e.g., 140 BPM detected as 70 or 280)
+pub fn detect_bpm_with_range(path: &Path, min_bpm: f32, max_bpm: f32) -> Result<BpmResult> {
+    log::debug!("Detecting BPM for: {:?} (range: {}-{})", path, min_bpm, max_bpm);
 
     // Open the audio file
     let file = std::fs::File::open(path)
@@ -181,7 +187,7 @@ pub fn detect_bpm(path: &Path) -> Result<BpmResult> {
     };
 
     // Use last known good BPM if final is 0
-    let final_bpm = if detected_bpm > 0.0 {
+    let mut final_bpm = if detected_bpm > 0.0 {
         detected_bpm
     } else {
         last_bpm
@@ -189,6 +195,21 @@ pub fn detect_bpm(path: &Path) -> Result<BpmResult> {
 
     if final_bpm <= 0.0 {
         anyhow::bail!("Could not detect BPM");
+    }
+
+    // Normalize BPM to fit within the specified range
+    // This handles octave errors (e.g., 70 BPM detected instead of 140)
+    if min_bpm > 0.0 && max_bpm > 0.0 {
+        // Double BPM if below minimum
+        while final_bpm < min_bpm && final_bpm * 2.0 <= max_bpm {
+            final_bpm *= 2.0;
+            log::debug!("BPM doubled to {:.1} (was below minimum {})", final_bpm, min_bpm);
+        }
+        // Halve BPM if above maximum
+        while final_bpm > max_bpm && final_bpm / 2.0 >= min_bpm {
+            final_bpm /= 2.0;
+            log::debug!("BPM halved to {:.1} (was above maximum {})", final_bpm, max_bpm);
+        }
     }
 
     log::info!(

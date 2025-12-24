@@ -44,6 +44,18 @@ struct Args {
     /// Skip BPM analysis (faster export, no tempo info)
     #[arg(long)]
     no_bpm: bool,
+
+    /// Minimum BPM for detection range (default: 70)
+    #[arg(long, default_value = "70")]
+    min_bpm: f32,
+
+    /// Maximum BPM for detection range (default: 170)
+    #[arg(long, default_value = "170")]
+    max_bpm: f32,
+
+    /// Cache detected BPM to source file's ID3/metadata tags
+    #[arg(long)]
+    cache_bpm: bool,
 }
 
 fn main() -> Result<()> {
@@ -104,7 +116,15 @@ fn main() -> Result<()> {
         let pipeline = ExportPipeline::new(config, analyzer)?;
         pipeline.export(&library)?;
     } else {
-        let analyzer = RealAnalyzer::new();
+        let analyzer = RealAnalyzer::new()
+            .with_bpm_range(args.min_bpm, args.max_bpm)
+            .with_id3_caching(args.cache_bpm);
+
+        if args.cache_bpm {
+            log::info!("BPM caching enabled - detected BPM will be written to source files");
+        }
+        log::info!("BPM detection range: {}-{} BPM", args.min_bpm, args.max_bpm);
+
         let pipeline = ExportPipeline::new(config, analyzer)?;
         pipeline.export(&library)?;
     }

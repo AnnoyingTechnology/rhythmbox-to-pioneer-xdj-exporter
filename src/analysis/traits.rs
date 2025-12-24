@@ -1,13 +1,14 @@
 //! Analysis trait definitions and data structures
 
-use crate::model::MusicalKey;
+use crate::model::{MusicalKey, Track};
 use anyhow::Result;
 use std::path::Path;
 
 /// Audio analyzer trait - allows swapping between stub and real implementations
 pub trait AudioAnalyzer {
     /// Analyze an audio file and return all analysis data
-    fn analyze(&self, audio_path: &Path) -> Result<AnalysisResult>;
+    /// Takes the track context to check for existing metadata (e.g., BPM from ID3)
+    fn analyze(&self, audio_path: &Path, track: &Track) -> Result<AnalysisResult>;
 }
 
 /// Complete analysis result for a track

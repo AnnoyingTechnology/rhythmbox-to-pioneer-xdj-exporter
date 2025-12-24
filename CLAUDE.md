@@ -2,8 +2,27 @@
 
 ## Current Status (2025-12-24)
 
-**Phase:** Arbitrary playlist export WORKING!
-**Status:** Can export any Rhythmbox playlist to XDJ-XZ. Tested with 4 and 10 track playlists.
+**Phase:** BPM Detection WORKING!
+**Status:** Full export pipeline with BPM detection. Works on XDJ-XZ.
+
+---
+
+## BPM Detection (Completed)
+
+Features:
+- **Range-constrained detection** (default 70-170 BPM) - handles octave errors
+- **Skips tracks with existing BPM** from ID3/metadata
+- **Optional caching** to source files (`--cache-bpm` flag)
+  - Works for FLAC files
+  - MP3 skipped due to lofty library TBPM issue (TODO: fix with mutagen fallback)
+
+CLI options:
+```bash
+cargo run -- --output /path/to/usb --playlist "MyPlaylist"           # BPM detection enabled
+cargo run -- --output /path/to/usb --playlist "MyPlaylist" --no-bpm  # Skip detection
+cargo run -- --output /path/to/usb --playlist "MyPlaylist" --cache-bpm  # Cache to files
+cargo run -- --output /path/to/usb --min-bpm 100 --max-bpm 180       # Custom range
+```
 
 ---
 

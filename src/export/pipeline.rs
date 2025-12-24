@@ -123,10 +123,10 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
                 track.title
             );
 
-            // Analyze the track
+            // Analyze the track (pass track for metadata like existing BPM)
             let analysis = self
                 .analyzer
-                .analyze(&track.file_path)
+                .analyze(&track.file_path, track)
                 .with_context(|| format!("Failed to analyze track: {:?}", track.file_path))?;
 
             // Copy audio file to USB
