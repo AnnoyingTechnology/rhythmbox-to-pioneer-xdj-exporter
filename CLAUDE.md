@@ -53,26 +53,12 @@ Dependencies:
 - [x] Filename sanitization for FAT32 (quotes, colons, etc. → underscore)
 
 ### Known Issues
-- **Some tracks show blank artist on XDJ** - Root cause unknown, extensive investigation completed
-  - **Verified CORRECT:**
-    - Artist data IS in the PDB (verified via hex dump)
-    - artist_id values ARE correctly assigned to track rows (1-66 range, all valid)
-    - Artist row structure matches reference (8-byte header + 2-byte offset array + DeviceSQL string)
-    - DeviceSQL string encoding is correct (short ASCII format)
-    - Row offsets in footer are correctly variable-length
-    - Page header fields (num_rows_small, num_rows_large, free_size, used_size) are correct
-    - Multi-page track tables correctly chain (page 2 → 41 → 42 → ...)
-    - All 66 artists fit in single page (1935 bytes heap, 3876 available)
-  - **What's different from reference:**
-    - Reference has 3 artists (1 row group), our export has 66 artists (5 row groups)
-    - Reference has fixed-length rows (all "ARTISTTEST*" = 11 chars), ours are variable
-    - Reference has 3 tracks on 1 page, we have 84 tracks across multiple pages
-  - **Attempted fixes that failed:**
-    - 16-byte header modification → 100% regression (reverted)
-  - **Issue persists** - same artists missing regardless of changes tested
-  - Needs: actual Rekordbox export with many artists to compare row group structure
-- **Duplicate tracks with case-different paths** - FAT32 case-insensitivity causes overwrites
-  - e.g., "Album Name" vs "album name" → same folder on USB
+- ~~**Some tracks show blank artist on XDJ**~~ - **FIXED** (see Row Group Fix below)
+- **FAT32 filename issues** - Need to slugify and truncate filenames
+  - FAT32 is case-insensitive: "Album Name" vs "album name" → same folder
+  - Long filenames can cause issues
+  - Special characters may not be supported
+  - **TODO:** Implement proper slugification and truncation for all paths
 - **Performance is poor for large exports** - ~10 minutes for 84 tracks
   - 30GB RAM usage during analysis
   - All CPU cores maxed (31 threads on 32-core system)
@@ -105,6 +91,35 @@ Libraries to use:
 - [ ] Beat timestamp detection (stratum-dsp has BeatGrid)
 - [ ] PQTZ section in ANLZ files
 - [ ] Quantized beat positions
+
+---
+
+## Row Group Fix (2025-12-24)
+
+**Root cause of blank artist metadata in large exports:** Incorrect row group footer structure.
+
+The PDB format stores row offsets in "row groups" of 16 rows each at the end of data pages. The footer grows downward from the page boundary. Each group contains:
+- Row offsets (2 bytes each, in reverse order within group)
+- Present flags (2 bytes) - bitmask of which slots are used
+- Unknown field (2 bytes) - 0 for full groups, 2^highest_bit for partial
+
+**What was wrong:**
+1. We wrote `unknown=0x8000` for full groups (should be `0x0000`)
+2. We wrote 16 offsets for ALL groups (partial groups should only have actual row count)
+3. We wrote groups in forward order (should be reverse: last group first)
+
+**Reference analysis (`examples/reference-20/` with 20 artists = 2 row groups):**
+```
+Footer at 0x6fd0-0x6fff (48 bytes):
+- Group 1 (partial, 4 rows) at 0x6fd0-0x6fdb: 4 offsets + present=0x000f + unknown=0x0008
+- Group 0 (full, 16 rows) at 0x6fdc-0x6fff: 16 offsets + present=0xffff + unknown=0x0000
+```
+
+**Code changes in `src/pdb/writer.rs`:**
+- `row_group_unknown_high_bit()`: Return 0 when flags=0xffff
+- `write_row_groups()`: Iterate `(0..num_groups).rev()` to write in reverse order
+- `write_row_groups()`: Only write actual row count offsets for partial groups
+- `row_group_bytes()`: Calculate `full_groups * 36 + partial_rows * 2 + 4`
 
 ---
 
@@ -175,6 +190,12 @@ This is counterintuitive because History tables seem like optional tracking data
 8. **Empty tables** - Labels and Artwork are header-only (no data pages)
 9. **File header** - `next_unused_page=53`, `sequence=31` to match reference
 10. **Keys table** - Expanded to all 24 musical keys (was 3)
+11. **Row group structure fix (MAJOR)** - Fixed multi-row-group handling for large exports
+    - `row_group_unknown_high_bit()`: Returns 0 for full groups (flags=0xffff), 2^highest_bit for partial
+    - `write_row_groups()`: Writes groups in REVERSE order (partial first, group 0 at page boundary)
+    - `write_row_groups()`: Only writes actual row count offsets for partial groups (not padded to 16)
+    - `row_group_bytes()`: Calculates correct footer size: full_groups × 36 + partial_rows × 2 + 4
+    - This fixed blank artist metadata for tracks in the first row group (IDs 1-16)
 
 ---
 

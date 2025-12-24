@@ -915,7 +915,13 @@ fn align_to_4(heap: &mut Vec<u8>) -> usize {
 }
 
 fn row_group_bytes(num_rows: usize) -> usize {
-    row_group_count(num_rows) * 36
+    // Full groups: 16 offsets * 2 bytes + 2 (present) + 2 (unknown) = 36 bytes
+    // Partial groups: N offsets * 2 bytes + 2 (present) + 2 (unknown) = N*2 + 4 bytes
+    let full_groups = num_rows / 16;
+    let partial_rows = num_rows % 16;
+    let full_bytes = full_groups * 36;
+    let partial_bytes = if partial_rows > 0 { partial_rows * 2 + 4 } else { 0 };
+    full_bytes + partial_bytes
 }
 
 fn page_padding(heap_len: usize, num_rows: usize) -> Result<usize> {
@@ -931,17 +937,22 @@ where
     F: Fn(u16) -> u16,
 {
     let num_groups = row_group_count(num_rows);
-    for group_idx in 0..num_groups {
+    // Write groups in REVERSE order: last group first (closest to heap), group 0 last (at page boundary)
+    // This matches Rekordbox's incremental append behavior
+    for group_idx in (0..num_groups).rev() {
         let start_row = group_idx * 16;
         let end_row = (start_row + 16).min(num_rows);
+        let rows_in_group = end_row - start_row;
 
-        let mut offsets = [0u16; 16];
+        // Collect actual offsets for this group
+        let mut offsets = Vec::with_capacity(rows_in_group);
         let mut flags = 0u16;
         for (slot, offset) in row_offsets[start_row..end_row].iter().enumerate() {
-            offsets[slot] = *offset;
+            offsets.push(*offset);
             flags |= 1 << slot;
         }
 
+        // Write offsets in reverse order (only actual row count, not padded to 16)
         for off in offsets.iter().rev() {
             file.write_all(&off.to_le_bytes())?;
         }
@@ -955,7 +966,9 @@ where
 }
 
 fn row_group_unknown_high_bit(flags: u16) -> u16 {
-    if flags == 0 {
+    // Full groups (all 16 slots used) have unknown=0
+    // Partial groups have unknown = 2^highest_set_bit
+    if flags == 0 || flags == 0xffff {
         0
     } else {
         let leading = flags.leading_zeros() as u16;
