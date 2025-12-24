@@ -34,6 +34,9 @@ urlencoding = "2.1"
 # MD5 for track ID generation
 md5 = "0.7"
 
+# ID3 tag reading for ratings
+id3 = "1.14"
+
 # Shell expansion for ~ in paths
 shellexpand = "3.1"
 

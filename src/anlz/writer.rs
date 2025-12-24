@@ -36,7 +36,7 @@ const PVBR_TOTAL_SIZE: u32 = 20;
 pub fn write_dat_file(
     path: &Path,
     track: &Track,
-    analysis: &AnalysisResult,
+    _analysis: &AnalysisResult,
     audio_path: &str,
 ) -> Result<()> {
     log::debug!("Writing ANLZ .DAT file: {:?}", path);

@@ -6,7 +6,7 @@
 use crate::analysis::AnalysisResult;
 use crate::model::{Playlist, Track};
 use super::types::{TableType, FileType};
-use super::strings::{encode_device_sql, encode_device_sql_utf16_annotated};
+use super::strings::encode_device_sql;
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::fs::File;
@@ -1532,8 +1532,9 @@ fn write_tracks_table(
         // 0x58: color_id
         heap.push(0u8);
 
-        // 0x59: rating
-        heap.push(0u8);
+        // 0x59: rating (0-5 stars as per Deep Symmetry docs)
+        let rating = track.rating.unwrap_or(0).min(5);
+        heap.push(rating);
 
         // 0x5A-0x5B: file_type
         heap.extend_from_slice(&file_type.to_le_bytes());
@@ -1562,7 +1563,7 @@ fn write_tracks_table(
         let mut string_offsets: Vec<u16> = vec![0; 21];
 
         // Helper to add a string and record its offset
-        let mut add_string = |index: usize, data: &[u8], offsets: &mut Vec<u16>, buffer: &mut Vec<u8>| {
+        let add_string = |index: usize, data: &[u8], offsets: &mut Vec<u16>, buffer: &mut Vec<u8>| {
             offsets[index] = (string_data_start + buffer.len()) as u16;
             buffer.extend_from_slice(data);
         };

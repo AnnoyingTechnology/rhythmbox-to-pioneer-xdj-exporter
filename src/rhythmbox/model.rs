@@ -15,6 +15,7 @@ pub struct RhythmboxEntry {
     pub bpm: Option<f32>,
     pub year: Option<u32>,
     pub comment: Option<String>,
+    pub rating: Option<u8>,       // 0-5 stars
 }
 
 impl RhythmboxEntry {

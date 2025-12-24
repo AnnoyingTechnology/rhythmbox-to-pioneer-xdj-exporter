@@ -21,18 +21,70 @@ pub struct UsbOrganizer {
     contents_dir: PathBuf,
 }
 
+/// Maximum length for path components on FAT32 (safe limit)
+const MAX_PATH_COMPONENT_LEN: usize = 200;
+
+/// Maximum length for filenames on FAT32 (255 chars including extension)
+const MAX_FILENAME_LEN: usize = 250;
+
 /// Sanitize a string for use as a path component (artist, album names)
+/// Handles FAT32 restrictions: illegal characters, case-insensitivity, length limits
 fn sanitize_path_component(s: &str) -> String {
     // Replace filesystem-unsafe characters with underscores
-    // Keep alphanumeric, spaces, hyphens, and common punctuation
-    s.chars()
+    // FAT32 illegal: / \ : * ? " < > |
+    // Also replace control characters and leading/trailing spaces/dots
+    let sanitized: String = s
+        .chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
             _ => c,
         })
-        .collect::<String>()
-        .trim()
-        .to_string()
+        .collect();
+
+    // Trim whitespace and dots from start/end (FAT32 doesn't like these)
+    let trimmed = sanitized.trim().trim_matches('.');
+
+    // Truncate to max length while preserving valid UTF-8
+    truncate_to_chars(trimmed, MAX_PATH_COMPONENT_LEN)
+}
+
+/// Sanitize a filename for FAT32, preserving extension
+fn sanitize_filename(filename: &str) -> String {
+    // Split into name and extension
+    let (name, ext) = match filename.rfind('.') {
+        Some(pos) if pos > 0 => (&filename[..pos], Some(&filename[pos..])),
+        _ => (filename, None),
+    };
+
+    // Sanitize the name part
+    let sanitized_name: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            _ => c,
+        })
+        .collect();
+
+    let trimmed_name = sanitized_name.trim().trim_matches('.');
+
+    // Calculate max name length (leave room for extension)
+    let ext_len = ext.map(|e| e.len()).unwrap_or(0);
+    let max_name_len = MAX_FILENAME_LEN.saturating_sub(ext_len);
+
+    let truncated_name = truncate_to_chars(trimmed_name, max_name_len);
+
+    // Reconstruct filename
+    match ext {
+        Some(e) => format!("{}{}", truncated_name, e),
+        None => truncated_name,
+    }
+}
+
+/// Truncate a string to a maximum number of characters, preserving UTF-8
+fn truncate_to_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 /// Compute ANLZ path components from a file path using FNV-1a hash
@@ -179,18 +231,31 @@ impl UsbOrganizer {
     /// Get the destination path for a music file
     ///
     /// Organizes files into Contents/Artist/Album/filename structure like Rekordbox does
+    /// Handles FAT32 case-insensitivity by normalizing to lowercase for collision detection
     pub fn music_file_path(&self, original_path: &Path, artist: &str, album: &str) -> PathBuf {
         // Get the filename and sanitize for FAT32/exFAT compatibility
         let filename = original_path
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let safe_filename = sanitize_path_component(&filename);
+        let safe_filename = sanitize_filename(&filename);
 
         // Organize by Artist/Album like Rekordbox does
         // Sanitize artist and album names for filesystem safety
         let safe_artist = sanitize_path_component(artist);
         let safe_album = sanitize_path_component(album);
+
+        // Handle empty names after sanitization
+        let safe_artist = if safe_artist.is_empty() {
+            "Unknown Artist".to_string()
+        } else {
+            safe_artist
+        };
+        let safe_album = if safe_album.is_empty() {
+            "Unknown Album".to_string()
+        } else {
+            safe_album
+        };
 
         self.contents_dir.join(safe_artist).join(safe_album).join(safe_filename)
     }

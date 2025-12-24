@@ -24,6 +24,7 @@ fn create_test_library() -> Library {
         track_number: Some(1),
         year: Some(2024),
         comment: None,
+        rating: Some(4), // 4 stars
     };
 
     let track2 = Track {
@@ -40,6 +41,7 @@ fn create_test_library() -> Library {
         track_number: Some(2),
         year: Some(2024),
         comment: None,
+        rating: None,
     };
 
     lib.add_track(track1);
@@ -101,7 +103,7 @@ fn test_export_creates_directory_structure() {
             assert!(usb_path.join("PIONEER").exists());
             assert!(usb_path.join("PIONEER/rekordbox").exists());
             assert!(usb_path.join("PIONEER/USBANLZ").exists());
-            assert!(usb_path.join("Music").exists());
+            assert!(usb_path.join("Contents").exists());
 
             // Verify PDB file was created
             assert!(usb_path.join("PIONEER/rekordbox/export.pdb").exists());
@@ -110,7 +112,7 @@ fn test_export_creates_directory_structure() {
             assert!(usb_path.join("PIONEER/USBANLZ").read_dir().unwrap().count() > 0);
 
             // Verify music files were copied
-            assert!(usb_path.join("Music").read_dir().unwrap().count() > 0);
+            assert!(usb_path.join("Contents").read_dir().unwrap().count() > 0);
 
             println!("✓ Export completed successfully");
             println!(
@@ -138,7 +140,26 @@ fn test_export_creates_directory_structure() {
 #[test]
 fn test_stub_analyzer() {
     let analyzer = StubAnalyzer::new();
-    let result = analyzer.analyze(&PathBuf::from("/tmp/test.mp3")).unwrap();
+
+    // Create a dummy track for the analyzer
+    let track = Track {
+        id: "test".to_string(),
+        title: "Test".to_string(),
+        artist: "Artist".to_string(),
+        album: "Album".to_string(),
+        genre: None,
+        duration_ms: 180000,
+        bpm: None,
+        key: None,
+        file_path: PathBuf::from("/tmp/test.mp3"),
+        file_size: 1000,
+        track_number: None,
+        year: None,
+        comment: None,
+        rating: None,
+    };
+
+    let result = analyzer.analyze(&PathBuf::from("/tmp/test.mp3"), &track).unwrap();
 
     // Stub analyzer should return None for all analysis data
     assert!(result.bpm.is_none());

@@ -65,6 +65,11 @@ struct Args {
     /// Cache detected key to source file's metadata tags
     #[arg(long)]
     cache_key: bool,
+
+    /// Maximum number of tracks to analyze in parallel (reduces memory usage)
+    /// Default: number of CPU cores - 1
+    #[arg(long)]
+    max_parallel: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -74,15 +79,20 @@ fn main() -> Result<()> {
     let log_level = if args.verbose { "debug" } else { "info" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
-    // Configure rayon thread pool (use all cores - 1, minimum 1)
-    let num_threads = std::thread::available_parallelism()
+    // Configure rayon thread pool
+    // Use user-specified --max-parallel, or default to all cores - 1 (minimum 1)
+    let default_threads = std::thread::available_parallelism()
         .map(|n| n.get().saturating_sub(1).max(1))
         .unwrap_or(4);
+    let num_threads = args.max_parallel.unwrap_or(default_threads);
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build_global()
         .ok(); // Ignore if already initialized
     log::info!("Using {} threads for parallel analysis", num_threads);
+    if args.max_parallel.is_some() {
+        log::info!("(Memory optimization: parallel limit set by --max-parallel)");
+    }
 
     if args.no_bpm && args.no_key {
         log::info!("Pioneer Exporter - Phase 1 (Stub Analysis)");

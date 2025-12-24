@@ -98,6 +98,7 @@ mod tests {
             track_number: Some(1),
             year: Some(2024),
             comment: None,
+            rating: None,
         };
 
         lib.add_track(track.clone());

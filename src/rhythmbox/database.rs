@@ -85,6 +85,12 @@ pub fn parse_database(path: &Path) -> Result<Vec<Track>> {
                             }
                         }
                         "comment" => entry.comment = Some(text),
+                        "rating" => {
+                            // Rhythmbox stores rating as 0-5 (0=unrated, 1-5=stars)
+                            if let Ok(rating) = text.parse::<u8>() {
+                                entry.rating = Some(rating);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -136,6 +142,10 @@ fn convert_entry_to_track(entry: &RhythmboxEntry) -> Option<Track> {
     // Get file size
     let file_size = std::fs::metadata(&file_path).ok()?.len();
 
+    // Read rating from audio file ID3 tags (POPM frame)
+    // Falls back to Rhythmbox XML rating if ID3 read fails
+    let rating = read_rating_from_file(&file_path).or(entry.rating);
+
     Some(Track {
         id,
         title,
@@ -156,5 +166,67 @@ fn convert_entry_to_track(entry: &RhythmboxEntry) -> Option<Track> {
         track_number: entry.track_number,
         year: entry.year,
         comment: entry.comment.clone(),
+        rating,
     })
+}
+
+/// Read rating from audio file ID3/POPM tags
+/// Returns rating as 0-5 stars (converted from ID3's 0-255 scale)
+fn read_rating_from_file(path: &std::path::Path) -> Option<u8> {
+    use lofty::file::TaggedFileExt;
+    use lofty::probe::Probe;
+    use lofty::tag::{ItemKey, TagType};
+
+    let tagged_file = Probe::open(path).ok()?.read().ok()?;
+
+    // Try to get the ID3v2 tag directly (for MP3s)
+    let tag = tagged_file.tag(TagType::Id3v2)?;
+
+    // The tag is a unified Tag, try to get POPM via item key
+    for item in tag.items() {
+        if item.key() == &ItemKey::Popularimeter {
+            if let lofty::tag::ItemValue::Binary(data) = item.value() {
+                // Parse POPM frame: find null terminator after email, then rating byte
+                if let Some(null_pos) = data.iter().position(|&b| b == 0) {
+                    if data.len() > null_pos + 1 {
+                        let rating_byte = data[null_pos + 1];
+                        let stars = id3_rating_to_stars(rating_byte)?;
+                        log::debug!("Read rating {} (ID3 {}) from {:?}", stars, rating_byte, path);
+                        return Some(stars);
+                    }
+                }
+            }
+        }
+    }
+
+    // POPM isn't in unified items - need to access raw ID3v2 frames
+    // Use the id3 crate directly for more reliable POPM access
+    if let Ok(id3_tag) = id3::Tag::read_from_path(path) {
+        // Look for POPM frames (there can be multiple with different emails)
+        for frame in id3_tag.frames() {
+            if frame.id() == "POPM" {
+                if let id3::Content::Popularimeter(popm) = frame.content() {
+                    let stars = id3_rating_to_stars(popm.rating)?;
+                    log::debug!("Read rating {} (ID3 {}) from {:?}", stars, popm.rating, path);
+                    return Some(stars);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Convert ID3 rating (1-255) to stars (1-5)
+/// Standard mapping: 1=1, 64=2, 128=3, 196=4, 255=5
+/// 0 = unrated
+fn id3_rating_to_stars(rating_byte: u8) -> Option<u8> {
+    match rating_byte {
+        0 => None,         // Unrated
+        1..=31 => Some(1), // 1 star
+        32..=95 => Some(2),  // 2 stars
+        96..=159 => Some(3), // 3 stars
+        160..=223 => Some(4), // 4 stars
+        224..=255 => Some(5), // 5 stars
+    }
 }

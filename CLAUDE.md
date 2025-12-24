@@ -54,19 +54,24 @@ Dependencies:
 
 ### Known Issues
 - ~~**Some tracks show blank artist on XDJ**~~ - **FIXED** (see Row Group Fix below)
-- **FAT32 filename issues** - Need to slugify and truncate filenames
-  - FAT32 is case-insensitive: "Album Name" vs "album name" → same folder
-  - Long filenames can cause issues
-  - Special characters may not be supported
-  - **TODO:** Implement proper slugification and truncation for all paths
+- ~~**FAT32 filename issues**~~ - **FIXED** (Phase 2.1)
+  - Illegal chars replaced with underscores
+  - Filenames truncated to 250 chars (preserving extension)
+  - Path components truncated to 200 chars
+  - Note: FAT32 case-insensitivity is NOT handled (same folder names with different cases may collide)
 - **Performance is poor for large exports** - ~10 minutes for 84 tracks
-  - 30GB RAM usage during analysis
+  - 30GB RAM usage during analysis (stratum-dsp decodes full audio to memory)
   - All CPU cores maxed (31 threads on 32-core system)
-  - stratum-dsp analysis is the bottleneck
-  - Consider: limiting concurrent analyses, streaming decode, or caching analyzed results
+  - Use `--max-parallel N` to limit concurrent analyses and reduce RAM usage
 
-### Phase 2.1
-- [ ] Rhythmbox track rating (stars) to PDB rating
+### Phase 2.1 - Complete
+- [x] Rhythmbox track rating (stars) to PDB rating
+  - Reads rating from ID3 POPM (Popularimeter) frames using `id3` crate
+  - Converts ID3 rating (0-255) to stars (1-5): 1-31→1, 32-95→2, 96-159→3, 160-223→4, 224-255→5
+  - Falls back to Rhythmbox XML rating if POPM not present
+- [x] FAT32 filename sanitization (illegal chars, truncation to 250 chars)
+- [x] FAT32 path component sanitization (truncation to 200 chars)
+- [x] `--max-parallel` CLI option to limit concurrent analyses (memory optimization)
 
 ### Phase 3 - Waveforms (Next)
 - [ ] Waveform preview (PWV3 - monochrome, ~400 samples)
@@ -206,9 +211,14 @@ This is counterintuitive because History tables seem like optional tracking data
 - REKORDBOX2: Track 1, 2
 - REKORDBOX3: Track 1, 2, 3
 
-**Export command:**
+**Reference export command:**
 ```bash
 cargo run -- --output /path/to/usb --playlist "REKORDBOX1" --playlist "REKORDBOX2" --playlist "REKORDBOX3" --no-bpm
+```
+
+**Quick test playlist (35 tracks, lightweight for USB testing):**
+```bash
+cargo run --release -- --output /path/to/usb --playlist "XDJ: Minimal"
 ```
 
 ---

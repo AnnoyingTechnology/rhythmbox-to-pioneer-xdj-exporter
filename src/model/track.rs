@@ -42,6 +42,9 @@ pub struct Track {
 
     /// Comment/description (optional)
     pub comment: Option<String>,
+
+    /// Rating (0-5 stars, 0 = unrated)
+    pub rating: Option<u8>,
 }
 
 /// Musical key representation (Camelot/Open Key notation)

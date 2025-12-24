@@ -26,20 +26,22 @@ pub struct StratumResult {
 /// Analyze audio file for BPM and key using stratum-dsp
 ///
 /// This decodes the audio once and extracts both BPM and key.
+/// Memory is released as soon as analysis completes.
 pub fn analyze_audio_file(path: &Path, min_bpm: f32, max_bpm: f32) -> Result<StratumResult> {
     log::debug!("Analyzing audio with stratum-dsp: {:?}", path);
 
     // Decode audio to mono f32 samples
     let (samples, sample_rate) = decode_to_mono(path)?;
 
+    let num_samples = samples.len();
     log::debug!(
         "Decoded {} samples ({:.1}s) at {}Hz",
-        samples.len(),
-        samples.len() as f32 / sample_rate as f32,
+        num_samples,
+        num_samples as f32 / sample_rate as f32,
         sample_rate
     );
 
-    if samples.len() < 44100 {
+    if num_samples < 44100 {
         anyhow::bail!("Audio too short for analysis");
     }
 
@@ -47,6 +49,9 @@ pub fn analyze_audio_file(path: &Path, min_bpm: f32, max_bpm: f32) -> Result<Str
     let config = AnalysisConfig::default();
     let result = analyze_audio(&samples, sample_rate, config)
         .map_err(|e| anyhow::anyhow!("Audio analysis failed: {:?}", e))?;
+
+    // Explicitly drop samples to free memory immediately after analysis
+    drop(samples);
 
     // Get BPM with range normalization
     let mut bpm = result.bpm;
