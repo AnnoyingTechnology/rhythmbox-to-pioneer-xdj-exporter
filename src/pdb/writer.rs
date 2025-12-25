@@ -1514,8 +1514,8 @@ fn write_tracks_table(
         // String 1: lyricist (empty)
         add_string(1, &[0x03], &mut string_offsets, &mut string_data);
 
-        // String 2: unknown2 - value "4" (matches reference export)
-        add_string(2, &encode_device_sql("4"), &mut string_offsets, &mut string_data);
+        // String 2: unknown2 - value "3" (matches reference-1 export)
+        add_string(2, &encode_device_sql("3"), &mut string_offsets, &mut string_data);
 
         // String 3: unknown3 - flag byte 0x01 (matches reference pattern)
         // This is encoded as DeviceSQL short string with 1 byte content

@@ -402,7 +402,15 @@ struct BeatEntry {
 }
 
 /// Generate beat entries for a constant-tempo track
+/// Only generates beats for tracks >= 4 seconds (enough for at least one bar at slow tempos)
 fn generate_beat_entries(bpm: f32, duration_ms: u32) -> Vec<BeatEntry> {
+    // Don't generate beatgrid for very short tracks (like sound effects)
+    // Reference exports show 0 beats for 1-second samples
+    if duration_ms < 4000 {
+        log::debug!("Track too short for beatgrid: {}ms < 4000ms", duration_ms);
+        return Vec::new();
+    }
+
     let tempo = (bpm * 100.0) as u16;
     let beat_interval_ms = 60000.0 / bpm; // ms per beat
 

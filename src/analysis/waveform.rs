@@ -20,6 +20,8 @@ use symphonia::core::probe::Hint;
 const PWAV_COLUMNS: usize = 400;
 /// Number of columns in PWV2 tiny preview
 const PWV2_COLUMNS: usize = 100;
+/// Number of columns in PWV4 color preview (fixed at 1200)
+const PWV4_COLUMNS: usize = 1200;
 /// Entries per second for detail waveforms (PWV3, PWV5)
 const DETAIL_ENTRIES_PER_SEC: f32 = 150.0;
 /// Maximum height value for PWAV/PWV3 (5 bits = 0-31)
@@ -52,13 +54,16 @@ pub fn generate_waveforms(audio_path: &Path, _duration_ms: u32) -> Result<Wavefo
     let preview = generate_pwav(&samples, sample_rate);
     let tiny_preview = generate_pwv2(&samples, sample_rate);
     let detail = generate_pwv3(&samples, sample_rate);
+    // PWV4: Reference exports have all zeros - XDJ-XZ doesn't need non-zero data
+    let color_preview = Vec::new(); // Will be written as zeros by ANLZ writer
     let color_detail = generate_pwv5(&samples, sample_rate);
 
     log::info!(
-        "Waveforms generated: PWAV={}, PWV2={}, PWV3={}, PWV5={} bytes",
+        "Waveforms generated: PWAV={}, PWV2={}, PWV3={}, PWV4={} (zeros), PWV5={} bytes",
         preview.len(),
         tiny_preview.len(),
         detail.len(),
+        color_preview.len(),
         color_detail.len()
     );
 
@@ -66,7 +71,7 @@ pub fn generate_waveforms(audio_path: &Path, _duration_ms: u32) -> Result<Wavefo
         preview,
         tiny_preview,
         detail,
-        color_preview: Vec::new(), // PWV4 not implemented yet
+        color_preview,
         color_detail,
     })
 }
@@ -93,8 +98,8 @@ fn generate_pwav(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
         // Calculate RMS and peak for this window
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-31)
-        let height = (peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8;
+        // Height based on peak (0-31), with minimum floor of 1 to avoid "empty" waveform
+        let height = ((peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
 
         if peak > max_peak {
             max_peak = peak;
@@ -137,8 +142,8 @@ fn generate_pwv2(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
 
         let (_, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-15)
-        let height = (peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8;
+        // Height based on peak (0-15), with minimum floor of 1
+        let height = ((peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8).max(1);
         result.push(height);
     }
 
@@ -166,8 +171,8 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-31)
-        let height = (peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8;
+        // Height based on peak (0-31), with minimum floor of 1
+        let height = ((peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
 
         // Whiteness=7 for PWV3 (unlike PWAV which uses 5)
         // Reference files consistently use whiteness=7 for detail waveforms
@@ -176,6 +181,61 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         result.push(encode_pwav_byte(height, whiteness));
     }
 
+    result
+}
+
+/// Generate PWV4 color preview waveform (1200 entries × 6 bytes = 7200 bytes)
+///
+/// PWV4 is critical for XDJ-XZ waveform display! Each 6-byte entry:
+/// - Channel 0: Unknown (0x40)
+/// - Channel 1: Luminance boost - MUST be non-zero for waveform to display
+/// - Channel 2: Inverse intensity for blue waveform mode
+/// - Channels 3-5: Red, Green, Blue components (0-127)
+fn generate_pwv4(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
+    let samples_per_column = samples.len() / PWV4_COLUMNS;
+
+    let mut result = Vec::with_capacity(PWV4_COLUMNS * 6);
+
+    for col in 0..PWV4_COLUMNS {
+        let start = col * samples_per_column;
+        let end = if samples_per_column > 0 {
+            ((col + 1) * samples_per_column).min(samples.len())
+        } else {
+            0
+        };
+
+        let (rms, peak) = if start < end && end <= samples.len() {
+            calculate_rms_and_peak(&samples[start..end])
+        } else {
+            (0.1, 0.1) // Default to small non-zero value
+        };
+
+        // Scale peak to 0-127 range for PWV4 channels
+        let intensity = ((peak * 127.0).min(127.0) as u8).max(1);
+        let rms_scaled = ((rms * 127.0).min(127.0) as u8).max(1);
+
+        // Channel 0: Unknown - use 0x40 like reference
+        result.push(0x40);
+
+        // Channel 1: Luminance boost - CRITICAL: must be non-zero
+        // Higher values = brighter waveform
+        result.push(intensity.max(0x20));
+
+        // Channel 2: Inverse intensity for blue waveform mode
+        result.push(rms_scaled.max(0x10));
+
+        // Channels 3-5: RGB color based on intensity
+        // Simple coloring: louder = more red/white, quieter = more blue
+        let red = intensity;
+        let green = (intensity as u16 * 3 / 4) as u8;
+        let blue = (intensity as u16 / 2) as u8;
+
+        result.push(red.max(0x10));
+        result.push(green.max(0x10));
+        result.push(blue.max(0x10));
+    }
+
+    log::debug!("PWV4: {} entries, {} bytes", PWV4_COLUMNS, result.len());
     result
 }
 
@@ -199,17 +259,29 @@ fn generate_pwv5(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         let end = ((i + 1) * samples_per_entry).min(samples.len());
         let chunk = &samples[start..end];
 
-        let (_rms, peak) = calculate_rms_and_peak(chunk);
+        let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-31)
-        let height = (peak * MAX_HEIGHT_PWV5 as f32).min(MAX_HEIGHT_PWV5 as f32) as u8;
+        // Height based on peak (0-31), with minimum floor of 1
+        let height = ((peak * MAX_HEIGHT_PWV5 as f32).min(MAX_HEIGHT_PWV5 as f32) as u8).max(1);
 
-        // For simple color: always use white (7,7,7) for maximum visibility
-        // Reference files use ff80 (white at height 0) for silence
-        // TODO: Use FFT for frequency band coloring (low=blue, mid=green, high=red)
-        let red = 7u8;
-        let green = 7u8;
-        let blue = 7u8;
+        // Color variation based on RMS/peak ratio (crest factor)
+        // Reference files have varied colors - uniform white may be rejected as invalid
+        // Low crest factor (sustained) = more red/orange
+        // High crest factor (transient) = more blue/white
+        let crest = if rms > 0.001 { peak / rms } else { 1.0 };
+        let (red, green, blue) = if crest < 1.5 {
+            // Sustained sound - red/orange
+            (7u8, 3u8, 0u8)
+        } else if crest < 2.5 {
+            // Mid - yellow/green
+            (5u8, 7u8, 2u8)
+        } else if crest < 4.0 {
+            // Transient - cyan/blue
+            (2u8, 5u8, 7u8)
+        } else {
+            // Very transient - white
+            (7u8, 7u8, 7u8)
+        };
 
         // Pack into 2 bytes: RRRG GGBB BHHH HH00
         let packed = encode_pwv5_entry(red, green, blue, height);

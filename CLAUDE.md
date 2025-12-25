@@ -87,10 +87,59 @@ This single test will eliminate half the possibilities.
 | A2 | Omit PWV4 entirely from EXT file | Fallback to PWAV? | PWV4 zeros = fatal | Structure issue |
 | A3 | Use reference ANLZ path (P05C/0001D2C0) in our PDB | Waveforms display | Path calculation issue | Other PDB issue |
 
-**A1 RESULT (2025-12-25): NO WAVEFORMS** → Problem is in PDB, not ANLZ data!
+**A1 RESULT (2025-12-25): NO WAVEFORMS** → Problem is AT LEAST in PDB
 - Copied reference ANLZ files to our path P9CC/00C30E0D
 - Our PDB + reference ANLZ = still no waveforms
-- This proves the issue is a PDB flag or field, not waveform encoding
+- This proves we have a PDB issue
+
+**REVERSE TEST (2025-12-25): NO WAVEFORMS** → Problem is ALSO in ANLZ!
+- Reference PDB (patched to point to P9CC/00C30E0D) + Our ANLZ = still no waveforms
+- This proves we have BOTH PDB and ANLZ issues
+- Must fix both to get waveforms working
+
+**ANLZ Comparison Findings (2025-12-25):**
+| Component | Reference | Ours | Issue |
+|-----------|-----------|------|-------|
+| DAT PQTZ size | 24 bytes (header-only) | 48 bytes (3 beats) | We generate beats for 1-sec sample |
+| DAT PVBR trailing | `d3 80` | `00 00` | VBR timing data missing |
+| DAT total size | 2362 bytes | 2386 bytes | 24 byte difference from PQTZ |
+| EXT PWV4 | ALL ZEROS | `40 20 10...` pattern | Reference is zeros, ours is non-zero |
+| PWAV heights | `a2` (height=2) | `a1` (height=1) | Minor, probably OK |
+
+**Key insight:** Reference PWV4 is all zeros! The experts were wrong about PWV4 needing data.
+
+---
+
+## CRITICAL USER TESTS (2025-12-25) - Breakthrough!
+
+User performed systematic tests on reference-1 export, swapping files with ours:
+
+| Test | Result | Conclusion |
+|------|--------|------------|
+| Remove `exportExt.pdb` | ✅ Works | **exportExt.pdb NOT required** - stop generating |
+| Remove `ANLZ0000.EXT` | ❌ Broken (narrow blue peaks only) | **EXT file is CRITICAL** for waveforms |
+| Remove `ANLZ0000.DAT` | ✅ Works | DAT file is secondary/optional |
+| Swap DAT with ours | ✅ Works | **Our DAT is valid** - not the problem |
+| Swap EXT with ours | ⚠️ PARTIAL - Main screen works, needle search & jogwheel broken | **Our EXT is partially broken** |
+
+### Key Inferences:
+
+1. **exportExt.pdb is NOT needed** - Can disable generation entirely
+2. **ANLZ0000.DAT is secondary** - Our DAT works fine, beatgrid/preview not blocking
+3. **ANLZ0000.EXT is the critical file** - Must be correct for waveforms
+4. **Our EXT is PARTIALLY working:**
+   - ✅ **Main screen waveform** (PWV3/PWV5) - WORKS
+   - ❌ **Needle search** (PWV4) - BROKEN
+   - ❌ **Jogwheel** (PWV4?) - BROKEN
+
+### Root Cause Identified: PWV4 in EXT file
+
+The main screen waveform uses **PWV3/PWV5** (detail waveforms) - our generation is correct!
+The needle search and jogwheel use **PWV4** (color preview) - our generation is broken!
+
+**Next step:** Fix PWV4 generation. The issue is NOT that PWV4 needs data vs zeros - the issue is our PWV4 section structure or data encoding is wrong.
+
+---
 
 ### Phase B: PWV4 Fixes (Primary Suspect)
 
@@ -549,7 +598,8 @@ When implementing new features, remember:
 * **Resampling to a known rate before analysis:** `rubato` (keeps aubio/key detection more stable across sources). ([docs.rs][14])
 * **If codec coverage becomes painful:** consider **GStreamer Rust bindings** as an optional “decode backend” for exotic formats. ([gstreamer.freedesktop.org][15])
 
-If you tell me your license constraints (GPL/AGPL acceptable or not), I can narrow these to the “safe-to-bundle” shortlist immediately.
+
+# NEVER DOUBT REFERENCE EXPORTS. THEY ARE REFERENCE: 100% WORKING. 
 
 [1]: https://docs.rs/aubio-rs?utm_source=chatgpt.com "aubio_rs - Rust"
 [2]: https://github.com/c4dm/qm-vamp-plugins?utm_source=chatgpt.com "c4dm/qm-vamp-plugins"
