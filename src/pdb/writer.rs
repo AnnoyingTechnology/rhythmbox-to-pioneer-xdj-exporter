@@ -145,10 +145,14 @@ pub fn write_pdb(
         remaining = &remaining[chunk_size..];
     }
 
-    // Track data pages: use reference page 2 (reference uses 2 and 51 but we only need one for 3 tracks)
+    // Track data pages: use reference page 2 for first batch (up to 10 tracks)
     let mut track_data_pages: Vec<u32> = vec![2];
-    // For more tracks, allocate pages starting after page 40 (last reference data page)
-    let mut next_alloc_page = 41u32;  // Start allocating after all reference pages
+
+    // For more tracks, allocate pages starting AFTER all empty_candidate values (41-52)
+    // This is critical: pages 41-52 are used as empty_candidate pointers by various tables.
+    // If we create pages in that range, parsers following table chains will find wrong page types.
+    let needs_extra_pages = track_chunks.len() > 1;
+    let mut next_alloc_page = 53u32;  // Start allocating after all empty_candidate pages
 
     // Add more pages if needed (beyond the 1 reference page)
     while track_data_pages.len() < track_chunks.len() {
@@ -156,12 +160,18 @@ pub fn write_pdb(
         next_alloc_page += 1;
     }
 
-    // File size must include all allocated pages
-    // Base layout uses pages 0-40 (41 pages)
-    // Additional track pages are allocated starting at page 41
-    let file_page_count = next_alloc_page.max(41);
+    // File size depends on whether we need pages beyond the reference 41
+    // - Base layout: pages 0-40 (41 pages) - this is the reference structure
+    // - If we need extra track pages: must include pages 41-52 as placeholders (53 pages minimum)
+    //   plus any additional track pages (53, 54, 55, ...)
+    let file_page_count = if needs_extra_pages {
+        next_alloc_page  // Includes pages 0-52 + any extra track pages
+    } else {
+        41  // Reference structure: pages 0-40 only
+    };
     file.set_len((file_page_count as u64) * PAGE_SIZE as u64)?;
-    log::debug!("PDB file size: {} pages ({} bytes)", file_page_count, file_page_count * PAGE_SIZE);
+    log::debug!("PDB file size: {} pages ({} bytes), track pages: {:?}",
+        file_page_count, file_page_count * PAGE_SIZE, &track_data_pages);
 
     log::debug!("Tracks: {} total, {} chunks, pages: {:?}",
         tracks.len(), track_chunks.len(), &track_data_pages[..track_chunks.len()]);
@@ -257,7 +267,7 @@ pub fn write_pdb(
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
-                write_genres_table(&mut file, &entities.genres, layout.data_pages[0], layout.empty_candidate)?;
+                write_genres_table(&mut file, &entities.genres, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
             TableType::Artists => {
                 seek_to_page(&mut file, layout.header_page)?;
@@ -281,7 +291,7 @@ pub fn write_pdb(
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
-                write_artists_table(&mut file, &entities.artists, layout.data_pages[0], layout.empty_candidate)?;
+                write_artists_table(&mut file, &entities.artists, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
             TableType::Albums => {
                 seek_to_page(&mut file, layout.header_page)?;
@@ -305,7 +315,7 @@ pub fn write_pdb(
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
-                write_albums_table(&mut file, &entities, layout.data_pages[0], layout.empty_candidate)?;
+                write_albums_table(&mut file, &entities, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
             // Labels is an empty table (no data) - handled in the empty tables branch below
             TableType::Keys => {
@@ -330,7 +340,7 @@ pub fn write_pdb(
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
-                write_keys_table(&mut file, layout.data_pages[0], layout.empty_candidate)?;
+                write_keys_table(&mut file, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
             TableType::Colors => {
                 seek_to_page(&mut file, layout.header_page)?;
@@ -429,7 +439,7 @@ pub fn write_pdb(
                 write_columns_table(&mut file, &entities.columns, layout.data_pages[0], layout.empty_candidate)?;
             }
             TableType::History => {
-                // History table - REQUIRED for XDJ to recognize USB
+                // History table - use reference data (XDJ requires populated history)
                 seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
@@ -450,11 +460,12 @@ pub fn write_pdb(
                 write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
+                // Write reference data page (contains historical playback data)
                 seek_to_page(&mut file, layout.data_pages[0])?;
                 file.write_all(REFERENCE_HISTORY_PAGE)?;
             }
             TableType::HistoryEntries => {
-                // HistoryEntries table - REQUIRED for XDJ to recognize USB
+                // HistoryEntries table - use reference data
                 seek_to_page(&mut file, layout.header_page)?;
                 let next_page = layout.data_pages.get(0).copied().unwrap_or(layout.empty_candidate);
                 write_page_header(
@@ -477,13 +488,14 @@ pub fn write_pdb(
                 write_header_page_content(&mut file, layout.header_page, first_data_page, layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
+                // Write reference data page
                 if let Some(&data_page) = layout.data_pages.get(0) {
                     seek_to_page(&mut file, data_page)?;
                     file.write_all(REFERENCE_HISTORY_ENTRIES_PAGE)?;
                 }
             }
             TableType::HistoryPlaylists => {
-                // HistoryPlaylists table - REQUIRED for XDJ to recognize USB
+                // HistoryPlaylists table - use reference data
                 seek_to_page(&mut file, layout.header_page)?;
                 let next_page = layout.data_pages.get(0).copied().unwrap_or(layout.empty_candidate);
                 write_page_header(
@@ -506,6 +518,7 @@ pub fn write_pdb(
                 write_header_page_content(&mut file, layout.header_page, first_data_page, layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
+                // Write reference data page
                 if let Some(&data_page) = layout.data_pages.get(0) {
                     seek_to_page(&mut file, data_page)?;
                     file.write_all(REFERENCE_HISTORY_PLAYLISTS_PAGE)?;
@@ -550,6 +563,56 @@ pub fn write_pdb(
         }
     }
 
+    // If file extends beyond page 40, we need to write proper placeholder pages
+    // for empty_candidate pages 41-52. These pages may be reached by parsers
+    // following table chains (via next_page pointers), so they must have correct types.
+    if file_page_count > 41 {
+        // Map of empty_candidate page -> table type
+        // (extracted from TABLE_LAYOUTS)
+        let empty_candidate_types: [(u32, u32); 12] = [
+            (41, 0x13), // History
+            (42, 0x06), // Colors
+            (43, 0x10), // Columns
+            (44, 0x11), // HistoryPlaylists
+            (45, 0x12), // HistoryEntries
+            (46, 0x07), // PlaylistTree
+            (47, 0x02), // Artists
+            (48, 0x01), // Genres
+            (49, 0x03), // Albums
+            (50, 0x05), // Keys
+            (51, 0x00), // Tracks
+            (52, 0x08), // PlaylistEntries
+        ];
+
+        for (page_num, table_type) in empty_candidate_types.iter() {
+            if *page_num < file_page_count {
+                seek_to_page(&mut file, *page_num)?;
+                // Write a "strange" empty page with correct type
+                // page_flags 0x44 indicates a strange/empty page
+                write_page_header(
+                    &mut file,
+                    *page_num,
+                    *table_type,
+                    *page_num + 1, // next_page points to next empty candidate
+                    0,             // num_rows_small
+                    0x1fff,        // num_rows_large (0x1fff = header/strange page)
+                    0,
+                    0,
+                    0x44,          // page_flags for strange/empty page
+                    1,
+                    0,
+                    0x1fff,
+                    0,
+                    0,
+                )?;
+                // Pad to full page
+                let padding = PAGE_SIZE as usize - 0x28;
+                file.write_all(&vec![0u8; padding])?;
+            }
+        }
+        log::debug!("Wrote empty placeholder pages for 41-{}", file_page_count.min(52));
+    }
+
     // Write table pointers back into the header
     // For tracks, use the actual last data page (based on how many chunks we wrote)
     let actual_track_last_page = if track_chunks.is_empty() {
@@ -575,16 +638,25 @@ pub fn write_pdb(
     }
 
     // Patch header metadata
-    // 0x0c: next_unused_page - points to the next allocatable page
+    // 0x0c: next_unused_page - always 53 (points past empty_candidate pages 41-52)
+    //       Even if file is smaller, this reserves the empty_candidate range
     // 0x10: unknown (5 in reference)
-    // 0x14: sequence - scales with content (observed: 1 track=14, 3 tracks=31, 20 tracks=108)
-    let total_entities = tracks.len() + entities.artists.len() + entities.albums.len() + entities.genres.len() + playlists.len();
-    let sequence = 14u32 + (total_entities as u32 * 3);
+    // 0x14: sequence - observed patterns:
+    //       1 track: sequence=14
+    //       3 tracks: sequence=31 (approximately 14 + tracks*3 + entities*3)
+    //       For simplicity: use 14 for 1 track, scale for more
+    let next_unused_page = 53u32;  // Always 53, matching reference behavior
+    let sequence = if tracks.len() <= 1 {
+        14u32  // Match reference-1 exactly
+    } else {
+        let total_entities = tracks.len() + entities.artists.len() + entities.albums.len() + entities.genres.len() + playlists.len();
+        14u32 + (total_entities as u32 * 3)
+    };
     file.seek(SeekFrom::Start(0x0c))?;
-    file.write_all(&file_page_count.to_le_bytes())?;
+    file.write_all(&next_unused_page.to_le_bytes())?;
     file.write_all(&5u32.to_le_bytes())?;
     file.write_all(&sequence.to_le_bytes())?;
-    log::debug!("PDB next_unused_page: {}, sequence: {} (entities: {})", file_page_count, sequence, total_entities);
+    log::debug!("PDB next_unused_page: {}, sequence: {} (tracks: {})", next_unused_page, sequence, tracks.len());
 
     log::info!("PDB file written successfully");
     Ok(())
@@ -1050,12 +1122,21 @@ fn write_header_page_content(file: &mut File, header_page: u32, first_data_page:
 }
 
 /// Write genres table (id + name)
-fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_page: u32) -> Result<()> {
+fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_page: u32, track_count: usize) -> Result<()> {
     log::debug!("Writing genres table: {} genres", genres.len());
 
     let num_rows_small = genres.len().min(0xff) as u8;
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if genres.is_empty() { 0 } else { (genres.len() - 1) as u16 };
+
+    // unknown1 and unknown3 vary based on track count (observed pattern):
+    // 1 track: unknown1=0x08, unknown3=0x20
+    // 3 tracks: unknown1=0x19, unknown3=0x60
+    let (unknown1, unknown3) = if track_count <= 1 {
+        (0x08u32, 0x20u8)
+    } else {
+        (0x19u32, 0x60u8)
+    };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1065,10 +1146,10 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
         next_page,
         num_rows_small,
         num_rows_large,
-        0x60,  // Match reference
+        unknown3,
         0x00,  // Match reference
         0x24,
-        0x19,  // Match reference (was 0x3b)
+        unknown1,
         0,
         0x0001,
         0,
@@ -1104,12 +1185,21 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
 }
 
 /// Write artists table
-fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, next_page: u32) -> Result<()> {
+fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, next_page: u32, track_count: usize) -> Result<()> {
     log::debug!("Writing artists table: {} artists", artists.len());
 
     let num_rows_small = artists.len().min(0xff) as u8;
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if artists.is_empty() { 0 } else { (artists.len() - 1) as u16 };
+
+    // unknown1 and unknown3 vary based on track count (observed pattern):
+    // 1 track: unknown1=0x07, unknown3=0x20
+    // 3 tracks: unknown1=0x18, unknown3=0x60
+    let (unknown1, unknown3) = if track_count <= 1 {
+        (0x07u32, 0x20u8)
+    } else {
+        (0x18u32, 0x60u8)
+    };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1119,10 +1209,10 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
         next_page,
         num_rows_small,
         num_rows_large,
-        0x60,  // Match reference
+        unknown3,
         0x00,  // Match reference
         0x24,
-        0x18,  // Match reference (was 0x3a)
+        unknown1,
         0,
         0x0001,
         0,
@@ -1191,13 +1281,22 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
 }
 
 /// Write albums table (different structure from artists!)
-fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32, next_page: u32) -> Result<()> {
+fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32, next_page: u32, track_count: usize) -> Result<()> {
     let albums = &entities.albums;
     log::debug!("Writing albums table: {} albums", albums.len());
 
     let num_rows_small = albums.len().min(0xff) as u8;
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if albums.is_empty() { 0 } else { (albums.len() - 1) as u16 };
+
+    // unknown1 and unknown3 vary based on track count (observed pattern):
+    // 1 track: unknown1=0x09, unknown3=0x20
+    // 3 tracks: unknown1=0x1a, unknown3=0x60
+    let (unknown1, unknown3) = if track_count <= 1 {
+        (0x09u32, 0x20u8)
+    } else {
+        (0x1au32, 0x60u8)
+    };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1207,10 +1306,10 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
         next_page,
         num_rows_small,
         num_rows_large,
-        0x60,  // Match reference (was 0xe0)
+        unknown3,
         0x00,
         0x24,
-        0x1a,  // Match reference (was 0x3c)
+        unknown1,
         0,
         0x0001,
         0,
@@ -1876,7 +1975,7 @@ fn write_colors_table(file: &mut File, page_index: u32, next_page: u32) -> Resul
 ///   - u32: key_id (1-based)
 ///   - u32: key_id2 (same as key_id)
 ///   - DeviceSQLString: name (e.g., "Am", "Em")
-fn write_keys_table(file: &mut File, page_index: u32, next_page: u32) -> Result<()> {
+fn write_keys_table(file: &mut File, page_index: u32, next_page: u32, track_count: usize) -> Result<()> {
     // All 24 musical keys (12 minor + 12 major)
     // Rekordbox key IDs follow this ordering
     let keys = [
@@ -1915,6 +2014,15 @@ fn write_keys_table(file: &mut File, page_index: u32, next_page: u32) -> Result<
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if keys.is_empty() { 0 } else { (keys.len() - 1) as u16 };
 
+    // unknown1 and unknown3 vary based on track count (observed pattern):
+    // 1 track: unknown1=0x0a, unknown3=0x20
+    // 3 tracks: unknown1=0x1b, unknown3=0x60
+    let (unknown1, unknown3) = if track_count <= 1 {
+        (0x0au32, 0x20u8)
+    } else {
+        (0x1bu32, 0x60u8)
+    };
+
     let page_start = file.stream_position()?;
     write_page_header(
         file,
@@ -1923,10 +2031,10 @@ fn write_keys_table(file: &mut File, page_index: u32, next_page: u32) -> Result<
         next_page,
         num_rows_small,
         num_rows_large,
-        0x60,  // Match reference (was 0x20)
+        unknown3,
         0x00,
         0x24,
-        0x1b, // Match reference (was 0x0a)
+        unknown1,
         0,
         0x0001, // unknown5
         0,
@@ -1976,14 +2084,16 @@ fn write_keys_table(file: &mut File, page_index: u32, next_page: u32) -> Result<
 const REFERENCE_COLUMNS_PAGE: &[u8; 4096] = include_bytes!("reference_columns.bin");
 
 /// Reference history playlists data page (page 36)
-/// Extracted from examples/PIONEER/rekordbox/export.pdb
-/// Contains history playlist entries that XDJ expects to be populated
+/// Contains history playlist entries - XDJ requires this for USB recognition
+/// This is historical playback data, not tied to current export's tracks
 const REFERENCE_HISTORY_PLAYLISTS_PAGE: &[u8; 4096] = include_bytes!("reference_history_playlists.bin");
 
 /// Reference history entries data page (page 38)
+/// Links tracks to history playlists - XDJ requires populated data
 const REFERENCE_HISTORY_ENTRIES_PAGE: &[u8; 4096] = include_bytes!("reference_history_entries.bin");
 
 /// Reference history data page (page 40)
+/// Contains history records with dates - XDJ requires this structure
 const REFERENCE_HISTORY_PAGE: &[u8; 4096] = include_bytes!("reference_history.bin");
 
 /// Write columns table (browse categories)
