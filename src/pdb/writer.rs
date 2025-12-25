@@ -208,9 +208,15 @@ pub fn write_pdb(
                     }
 
                     let page_num = track_data_pages[chunk_idx];
-                    // Only link to next page if there's actually a next chunk to write
+                    // Link to next page if there's a next chunk, otherwise point beyond file
+                    // Reference-84: last track page (63) has next=64 (next_unused_page - 1)
+                    // For small exports: use empty_candidate (51)
+                    // For large exports: use last_data_page + 1
                     let next_page = if chunk_idx + 1 < track_chunks.len() {
                         track_data_pages[chunk_idx + 1]
+                    } else if track_chunks.len() > 1 {
+                        // Large export: point to page after last track data
+                        track_data_pages[track_chunks.len() - 1] + 1
                     } else {
                         layout.empty_candidate
                     };
@@ -563,54 +569,12 @@ pub fn write_pdb(
         }
     }
 
-    // If file extends beyond page 40, we need to write proper placeholder pages
-    // for empty_candidate pages 41-52. These pages may be reached by parsers
-    // following table chains (via next_page pointers), so they must have correct types.
+    // Pages 41-52 are reserved for empty_candidate pointers in TABLE_LAYOUTS.
+    // Reference exports show these pages are ALL ZEROS (not pages with headers).
+    // The file is already zero-filled when created with set_len(), so we don't
+    // need to write anything here.
     if file_page_count > 41 {
-        // Map of empty_candidate page -> table type
-        // (extracted from TABLE_LAYOUTS)
-        let empty_candidate_types: [(u32, u32); 12] = [
-            (41, 0x13), // History
-            (42, 0x06), // Colors
-            (43, 0x10), // Columns
-            (44, 0x11), // HistoryPlaylists
-            (45, 0x12), // HistoryEntries
-            (46, 0x07), // PlaylistTree
-            (47, 0x02), // Artists
-            (48, 0x01), // Genres
-            (49, 0x03), // Albums
-            (50, 0x05), // Keys
-            (51, 0x00), // Tracks
-            (52, 0x08), // PlaylistEntries
-        ];
-
-        for (page_num, table_type) in empty_candidate_types.iter() {
-            if *page_num < file_page_count {
-                seek_to_page(&mut file, *page_num)?;
-                // Write a "strange" empty page with correct type
-                // page_flags 0x44 indicates a strange/empty page
-                write_page_header(
-                    &mut file,
-                    *page_num,
-                    *table_type,
-                    *page_num + 1, // next_page points to next empty candidate
-                    0,             // num_rows_small
-                    0x1fff,        // num_rows_large (0x1fff = header/strange page)
-                    0,
-                    0,
-                    0x44,          // page_flags for strange/empty page
-                    1,
-                    0,
-                    0x1fff,
-                    0,
-                    0,
-                )?;
-                // Pad to full page
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-            }
-        }
-        log::debug!("Wrote empty placeholder pages for 41-{}", file_page_count.min(52));
+        log::debug!("Pages 41-{} left as zeros (empty_candidate range)", file_page_count.min(52));
     }
 
     // Write table pointers back into the header
@@ -621,31 +585,45 @@ pub fn write_pdb(
         track_data_pages[track_chunks.len() - 1]
     };
 
+    // For large exports, empty_candidate for Tracks must point past last track data page
+    // Reference-84 pattern: last_page=63, empty_candidate=64, next_unused=65
+    let actual_track_empty_candidate = if track_chunks.len() > 1 {
+        actual_track_last_page + 1
+    } else {
+        TABLE_LAYOUTS[0].empty_candidate  // Use default (51) for small exports
+    };
+
     file.seek(SeekFrom::Start(0x1c))?;
     for layout in TABLE_LAYOUTS {
-        let last_page = if layout.table == TableType::Tracks {
-            actual_track_last_page
+        let (last_page, empty_candidate) = if layout.table == TableType::Tracks {
+            (actual_track_last_page, actual_track_empty_candidate)
         } else {
-            layout.last_page
+            (layout.last_page, layout.empty_candidate)
         };
         write_table_pointer(
             &mut file,
             layout.table as u32,
-            layout.empty_candidate,
+            empty_candidate,
             layout.header_page,
             last_page,
         )?;
     }
 
     // Patch header metadata
-    // 0x0c: next_unused_page - always 53 (points past empty_candidate pages 41-52)
-    //       Even if file is smaller, this reserves the empty_candidate range
+    // 0x0c: next_unused_page - the next page that would be allocated
+    //       Reference patterns:
+    //       - Small exports (<=53 pages): next_unused = 53 (reserves empty_candidate range)
+    //       - Large exports: next_unused = actual_track_empty_candidate + 1
     // 0x10: unknown (5 in reference)
     // 0x14: sequence - observed patterns:
     //       1 track: sequence=14
     //       3 tracks: sequence=31 (approximately 14 + tracks*3 + entities*3)
     //       For simplicity: use 14 for 1 track, scale for more
-    let next_unused_page = 53u32;  // Always 53, matching reference behavior
+    let next_unused_page = if track_chunks.len() > 1 {
+        actual_track_empty_candidate + 1  // Page after Tracks empty_candidate
+    } else {
+        53u32  // Reserve empty_candidate range for small exports
+    };
     let sequence = if tracks.len() <= 1 {
         14u32  // Match reference-1 exactly
     } else {

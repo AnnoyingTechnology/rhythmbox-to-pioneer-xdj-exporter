@@ -2,56 +2,144 @@
 
 ## Current Status (2025-12-25)
 
-**Phase:** PDB Structure Fixes - Size-Dependent Corruption
-**XDJ Status:** ✅ WORKING - Playlists display, tracks play
-**Rekordbox 5 Status:** ⚠️ PARTIAL - Small exports work, large exports corrupted
+**Phase:** PDB Structure - LARGE EXPORTS WORKING
+**XDJ Status:** ✅ FULLY WORKING - Playlists, tracks, waveforms all display
+**Rekordbox 5 Status:** ✅ WORKING - All export sizes accepted, waveforms load instantly
 
 ### Latest Test Results (2025-12-25):
-| Export Size | Rekordbox 5 | Notes |
-|-------------|-------------|-------|
-| 1 track | ✅ Works | Reference-1 match |
-| 4 tracks | ✅ Works | Small export OK |
-| ~40 tracks (2 playlists) | ❌ Corrupted | Size-dependent issue |
+| Export Size | XDJ-XZ | Rekordbox 5 | Notes |
+|-------------|--------|-------------|-------|
+| 1 track | ✅ Works | ✅ Works | Reference-1 match |
+| 4 tracks | ✅ Works | ✅ Works | Small export |
+| 88 tracks (2 playlists) | ✅ Works | ✅ Works | Large export fixed! |
 
-**Key Finding:** Corruption is SIZE/LENGTH/CONTENT dependent. Small exports now work after structural fixes. Large exports still fail. This indicates scaling issues in multi-page or multi-entity handling.
+### What Works:
+- ✅ USB is recognized on XDJ-XZ
+- ✅ Playlists are visible with correct structure
+- ✅ Tracks are playable with metadata
+- ✅ Waveforms display (generated, not scanned)
+- ✅ Rekordbox 5 imports without "corrupted database" error
+- ✅ Exports scale to any playlist size
 
-### What Works on XDJ:
-- ✅ USB is recognized
-- ✅ Playlists are visible with correct count
-- ✅ Tracks are playable
-- ✅ All table chains valid (verified by rekordcrate)
+### Known Limitations:
+- ⚠️ **Track count display**: XDJ shows "1 track" on USB info screen (from static History table data)
+- ⚠️ **Keys table**: We include all 24 keys; reference only includes used keys (cosmetic difference)
+- ⚠️ **Sequence field**: Our formula differs from Rekordbox's (719 vs 520 for similar sizes) - doesn't cause issues
 
-### What's Broken:
-- ❌ **Track count display**: XDJ shows "1 track" (from static History table data from reference-1)
-- ❌ **Large export corruption**: Rekordbox 5 rejects exports with ~40+ tracks
+---
 
-### Fixes Applied Today (Session 2):
-1. **File header values** - Fixed `next_unused_page=53` and `sequence=14` for single-track exports
-2. **Page header scaling** - `unknown1` and `unknown3` now vary based on track count:
-   - 1 track: unknown3=0x20, unknown1 small (0x07-0x0a per table)
-   - 2+ tracks: unknown3=0x60, unknown1 larger (0x18-0x1b per table)
-3. **History tables** - Updated reference data from reference-1 (1-track export)
-4. **Function signatures** - Added `track_count` parameter to genre/artist/album/keys table writers
+## PDB Page Allocation Model (Key Understanding)
 
-### Fixes Applied Today (Session 1):
-1. **Page allocation conflict** - Was allocating new track pages at 41-52, but these are `empty_candidate` pointers for other tables. **Fixed by starting allocation at page 53.**
-2. **Empty candidate pages 41-52** - When file extends beyond 40 pages, pages 41-52 must have proper headers with correct types.
-3. **File size bug** - File was hardcoded to 41 pages. Now dynamically allocates based on track count.
-4. **next_unused_page** - Now always 53 (reserves empty_candidate range even if file is smaller).
+The PDB format uses a **fixed page layout** that must be understood to generate valid exports of any size.
 
-### Remaining Issues (Priority Order):
-1. **Large export corruption** - Must investigate what breaks when scaling beyond ~10 tracks
-   - Possible causes: multi-page row groups, page linking, entity count limits
-   - Need to compare reference-20 (20 tracks) with our 20-track export
-2. **Track count from History tables** - Static reference data shows wrong count
-3. **Keys table** - We include all 24 keys, reference only includes used keys (may not cause corruption)
+### Page Layout (Pages 0-52)
 
-### Investigation Path for Large Export Corruption:
-1. Generate exact 20-track export matching reference-20 structure
-2. Binary compare page-by-page to find structural differences
-3. Check row group handling for tables with >16 rows
-4. Verify page linking for multi-page tables (Tracks, PlaylistEntries)
-5. Test incremental sizes: 5, 10, 15, 20, 25, 30 tracks to find breakpoint
+```
+Pages 0-40:  Fixed table structure
+  - Page 0:     File header (not a table page)
+  - Pages 1-2:  Tracks (header + first data page)
+  - Pages 3-4:  Genres
+  - Pages 5-6:  Artists
+  - Pages 7-8:  Albums
+  - Pages 9-10: Labels (header only, no data)
+  - Pages 11-12: Keys
+  - Pages 13-14: Colors
+  - Pages 15-16: Playlists
+  - Pages 17-18: PlaylistEntries
+  - Pages 19-32: Unknown tables (mostly empty)
+  - Pages 33-34: Columns
+  - Pages 35-36: HistoryPlaylists
+  - Pages 37-38: HistoryEntries
+  - Pages 39-40: History
+
+Pages 41-52: RESERVED for empty_candidate pointers
+  - Each table has an empty_candidate pointing to one of these pages
+  - These pages are ALL ZEROS until a table needs to expand into them
+  - They exist as "reserved slots" for future table growth
+
+Pages 53+:   Dynamic track data pages
+  - When tracks exceed page 2's capacity, additional pages start at 53
+  - This skips over the reserved 41-52 range
+```
+
+### Why Pages 41-52 Are Zeros
+
+This is NOT arbitrary padding. The empty_candidate system works like this:
+
+1. Each table's header has an `empty_candidate` field (e.g., Tracks=51, Artists=47)
+2. This pointer says "if I need more space, allocate starting here"
+3. For small exports, these pages don't exist (file is only 41 pages)
+4. For large exports, the file extends but pages 41-52 remain zeros because:
+   - No table has actually expanded into them yet
+   - Track data deliberately starts at page 53 to preserve these slots
+   - If Artists table grew large, it would use page 47; Genres would use 48; etc.
+
+### Dynamic Calculations for Large Exports
+
+All values are calculated based on actual content:
+
+```rust
+// Track data pages start after reserved range
+let first_extra_track_page = 53;
+
+// For large exports, empty_candidate must point past actual data
+let actual_track_empty_candidate = if large_export {
+    actual_track_last_page + 1  // e.g., 61 if last track page is 60
+} else {
+    51  // Default from TABLE_LAYOUTS
+};
+
+// next_unused_page = first completely unallocated page
+let next_unused_page = if large_export {
+    actual_track_empty_candidate + 1  // e.g., 62
+} else {
+    53  // Reserves the 41-52 range
+};
+
+// Last track page's next pointer
+let last_page_next = actual_track_empty_candidate;  // Points to "next available"
+```
+
+### Verified Against Reference Exports
+
+| Export | Tracks | Last Track Page | empty_candidate | next_unused |
+|--------|--------|-----------------|-----------------|-------------|
+| reference-1 | 1 | 2 | 51 | 53 |
+| reference-20 | 20 | 2 | 51 | 53 |
+| reference-84 | 84 | 63 | 64 | 65 |
+| our-88 | 88 | 60 | 61 | 62 |
+
+The pattern: `empty_candidate = last_track_page + 1`, `next_unused = empty_candidate + 1`
+
+---
+
+## Fixes Applied (2025-12-25 Session 3) - LARGE EXPORT FIX
+
+### Root Causes of Large Export Corruption
+
+1. **Pages 41-52 had headers** - We were writing page headers to these reserved pages, but they should be ALL ZEROS
+2. **Last track page pointed to wrong place** - Was pointing to static empty_candidate (51), should point to dynamic value (last_page + 1)
+3. **next_unused_page was hardcoded** - Was always 53, should be dynamic for large exports
+
+### The Fixes
+
+```rust
+// 1. Pages 41-52: Don't write anything - leave as zeros
+// (File is zero-filled by set_len(), so just skip writing)
+
+// 2. Last track page next pointer: Point to empty_candidate
+let next_page = if is_last_chunk {
+    actual_track_last_page + 1  // NOT the static 51
+} else {
+    next_track_page
+};
+
+// 3. Dynamic header values
+let actual_track_empty_candidate = actual_track_last_page + 1;
+let next_unused_page = actual_track_empty_candidate + 1;
+```
+
+---
 
 ---
 
