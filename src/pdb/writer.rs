@@ -577,84 +577,24 @@ pub fn write_pdb(
     Ok(())
 }
 
-/// Write exportExt.pdb - extended database file required by some Pioneer hardware
-/// This is a minimal stub with 9 empty tables
+/// Reference exportExt.pdb data - contains waveform preview data that is
+/// required for Pioneer DJ hardware to display waveforms. This file is identical
+/// between different Rekordbox exports (3-track and 20-track exports have the
+/// same exportExt.pdb), so we use static reference data like the History tables.
+const REFERENCE_EXPORTEXT: &[u8] = include_bytes!("../../examples/reference_exportext.pdb");
+
+/// Write exportExt.pdb - extended database file required by Pioneer hardware
+///
+/// Uses reference data that contains waveform preview metadata. This data is
+/// identical across different exports (like History tables), so we copy it
+/// directly rather than generating it.
 pub fn write_pdb_ext(path: &Path) -> Result<()> {
     log::info!("Writing exportExt.pdb file: {:?}", path);
 
-    let mut file = File::create(path)
-        .with_context(|| format!("Failed to create exportExt.pdb file: {:?}", path))?;
+    std::fs::write(path, REFERENCE_EXPORTEXT)
+        .with_context(|| format!("Failed to write exportExt.pdb file: {:?}", path))?;
 
-    // exportExt.pdb has 9 tables (observed from reference)
-    let num_tables = 9u32;
-
-    // Write file header (same structure as export.pdb)
-    file.write_all(&0u32.to_le_bytes())?;  // unknown1
-    file.write_all(&PAGE_SIZE.to_le_bytes())?;  // page_size
-    file.write_all(&num_tables.to_le_bytes())?;  // num_tables
-    file.write_all(&0u32.to_le_bytes())?;  // next_unused_page (will patch)
-    file.write_all(&5u32.to_le_bytes())?;  // unknown
-    file.write_all(&4u32.to_le_bytes())?;  // sequence
-    file.write_all(&0u32.to_le_bytes())?;  // gap
-
-    // Table types for exportExt (based on reference analysis)
-    let ext_tables = [
-        0u32, 1, 2, 3, 6, 7, 8, 19, 20,  // Types from reference
-    ];
-
-    // Write table pointers (will patch later)
-    let table_ptr_start = file.stream_position()?;
-    for _ in 0..num_tables {
-        file.write_all(&[0u8; 16])?;  // Placeholder
-    }
-
-    // Pad header page
-    let current_pos = file.stream_position()?;
-    let header_padding = PAGE_SIZE as u64 - current_pos;
-    file.write_all(&vec![0u8; header_padding as usize])?;
-
-    // Write empty table pages (header + data for each)
-    let mut current_page = 1u32;
-    let mut table_pages = Vec::new();
-
-    for &table_type in &ext_tables {
-        let first_page = current_page;
-        let last_page = current_page;  // Single page per table
-
-        // Write a minimal empty page
-        let page_start = file.stream_position()?;
-        file.write_all(&0u32.to_le_bytes())?;  // unknown
-        file.write_all(&current_page.to_le_bytes())?;  // page_index
-        file.write_all(&table_type.to_le_bytes())?;  // page_type
-        let empty_candidate = current_page + 1;
-        file.write_all(&empty_candidate.to_le_bytes())?;  // next_page (empty candidate)
-        // Rest of page header
-        file.write_all(&[0u8; 24])?;
-        // Pad to full page
-        let remaining = PAGE_SIZE as u64 - (file.stream_position()? - page_start);
-        file.write_all(&vec![0u8; remaining as usize])?;
-
-        table_pages.push((table_type, first_page, last_page, empty_candidate));
-        current_page += 2;  // page + empty candidate
-
-        // Write empty candidate page
-        write_empty_candidate_page(&mut file, empty_candidate)?;
-    }
-
-    // Go back and write table pointers
-    file.seek(SeekFrom::Start(table_ptr_start))?;
-    for (table_type, first_page, last_page, empty_candidate) in &table_pages {
-        file.write_all(&table_type.to_le_bytes())?;
-        file.write_all(&empty_candidate.to_le_bytes())?;
-        file.write_all(&first_page.to_le_bytes())?;
-        file.write_all(&last_page.to_le_bytes())?;
-    }
-
-    // Patch next_unused_page in header
-    file.seek(SeekFrom::Start(0x0c))?;
-    file.write_all(&current_page.to_le_bytes())?;
-
-    log::info!("exportExt.pdb written successfully");
+    log::info!("exportExt.pdb written successfully (reference data: {} bytes)", REFERENCE_EXPORTEXT.len());
     Ok(())
 }
 

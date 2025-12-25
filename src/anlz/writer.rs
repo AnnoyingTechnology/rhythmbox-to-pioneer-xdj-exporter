@@ -23,6 +23,14 @@ const PWV2_MAGIC: &[u8; 4] = b"PWV2";
 const PWV3_MAGIC: &[u8; 4] = b"PWV3";
 /// PWV5 magic number (color waveform detail)
 const PWV5_MAGIC: &[u8; 4] = b"PWV5";
+/// PWV4 magic number (color waveform preview)
+const PWV4_MAGIC: &[u8; 4] = b"PWV4";
+/// PWV4 header size (24 bytes)
+const PWV4_HEADER_SIZE: u32 = 24;
+/// PWV4 entry count (1200 columns)
+const PWV4_ENTRY_COUNT: u32 = 1200;
+/// PWV4 entry size (6 bytes per entry)
+const PWV4_ENTRY_SIZE: u32 = 6;
 /// PCOB magic number (cue points)
 const PCOB_MAGIC: &[u8; 4] = b"PCOB";
 /// PCO2 magic number (cue points v2)
@@ -72,8 +80,8 @@ pub fn write_dat_file(
     let mut file = File::create(path)
         .with_context(|| format!("Failed to create ANLZ .DAT file: {:?}", path))?;
 
-    // Get BPM from track metadata only (not from analysis)
-    let bpm = track.bpm;
+    // Get BPM - prefer track metadata (ID3), fallback to analyzed BPM
+    let bpm = track.bpm.or(analysis.bpm);
 
     write_dat_sections(&mut file, audio_path, bpm, track.duration_ms, &analysis.waveforms)?;
 
@@ -144,14 +152,13 @@ fn write_dat_sections(
     // Calculate section sizes
     let ppth_section_len = PPTH_HEADER_SIZE + path_len;
 
-    // PQTZ section if BPM is available
-    let (pqtz_section_len, beat_entries) = if let Some(bpm_value) = bpm {
-        let entries = generate_beat_entries(bpm_value, duration_ms);
-        let len = PQTZ_HEADER_SIZE + (entries.len() as u32 * PQTZ_BEAT_ENTRY_SIZE);
-        (len, Some(entries))
+    // PQTZ section - always present (even with 0 beats)
+    let beat_entries = if let Some(bpm_value) = bpm {
+        generate_beat_entries(bpm_value, duration_ms)
     } else {
-        (0, None)
+        Vec::new() // Empty beatgrid
     };
+    let pqtz_section_len = PQTZ_HEADER_SIZE + (beat_entries.len() as u32 * PQTZ_BEAT_ENTRY_SIZE);
 
     // PWAV section (400 bytes of waveform data)
     let pwav_entries = if waveforms.preview.len() == 400 {
@@ -197,33 +204,31 @@ fn write_dat_sections(
     file.write_all(&path_len.to_be_bytes())?;
     file.write_all(&path_utf16)?;
 
-    // --- PVBR Section (VBR index - 1620 bytes total with padding) ---
+    // --- PVBR Section (VBR index - 1620 bytes total) ---
+    // Header is 16 bytes: magic(4) + len_header(4) + len_tag(4) + unknown(4)
     file.write_all(PVBR_MAGIC)?;
     file.write_all(&PVBR_HEADER_SIZE.to_be_bytes())?;
     file.write_all(&PVBR_TOTAL_SIZE.to_be_bytes())?;
-    // Write VBR index data (1604 bytes of zeros after 16-byte header)
+    file.write_all(&0u32.to_be_bytes())?; // unknown field (part of 16-byte header)
+    // Write VBR index data (1604 bytes of zeros)
     file.write_all(&vec![0u8; (PVBR_TOTAL_SIZE - PVBR_HEADER_SIZE) as usize])?;
 
-    // --- PQTZ Section (beatgrid) ---
-    if let Some(entries) = beat_entries {
-        let num_beats = entries.len() as u32;
-        let pqtz_total_len = PQTZ_HEADER_SIZE + (num_beats * PQTZ_BEAT_ENTRY_SIZE);
+    // --- PQTZ Section (beatgrid) - always present ---
+    let num_beats = beat_entries.len() as u32;
+    file.write_all(PQTZ_MAGIC)?;
+    file.write_all(&PQTZ_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&pqtz_section_len.to_be_bytes())?;
+    file.write_all(&0u32.to_be_bytes())?; // unknown1
+    file.write_all(&0x00080000u32.to_be_bytes())?; // unknown2 (0x00080000 per reference)
+    file.write_all(&num_beats.to_be_bytes())?;
 
-        file.write_all(PQTZ_MAGIC)?;
-        file.write_all(&PQTZ_HEADER_SIZE.to_be_bytes())?;
-        file.write_all(&pqtz_total_len.to_be_bytes())?;
-        file.write_all(&0u32.to_be_bytes())?; // unknown1
-        file.write_all(&0x00800000u32.to_be_bytes())?; // unknown2
-        file.write_all(&num_beats.to_be_bytes())?;
-
-        for entry in entries {
-            file.write_all(&entry.beat_number.to_be_bytes())?;
-            file.write_all(&entry.tempo.to_be_bytes())?;
-            file.write_all(&entry.time.to_be_bytes())?;
-        }
-
-        log::debug!("PQTZ beatgrid written: {} beats", num_beats);
+    for entry in &beat_entries {
+        file.write_all(&entry.beat_number.to_be_bytes())?;
+        file.write_all(&entry.tempo.to_be_bytes())?;
+        file.write_all(&entry.time.to_be_bytes())?;
     }
+
+    log::debug!("PQTZ beatgrid written: {} beats", num_beats);
 
     // --- PWAV Section (waveform preview) ---
     file.write_all(PWAV_MAGIC)?;
@@ -290,13 +295,17 @@ fn write_ext_sections(
     let pwv5_entries = (waveforms.color_detail.len() / 2) as u32;
     let pwv5_section_len = PWV5_HEADER_SIZE + (pwv5_entries * 2);
 
+    // PWV4 section (color preview, 1200 entries × 6 bytes)
+    let pwv4_section_len = PWV4_HEADER_SIZE + (PWV4_ENTRY_COUNT * PWV4_ENTRY_SIZE);
+
     // Total file size
     let total_file_size = PMAI_HEADER_SIZE
         + ppth_section_len
         + pwv3_section_len
         + PCOB_HEADER_SIZE * 2  // PCOB sections
         + 20 * 2                 // PCO2 sections (20 bytes each)
-        + pwv5_section_len;
+        + pwv5_section_len
+        + pwv4_section_len;
 
     // --- PMAI Header ---
     file.write_all(PMAI_MAGIC)?;
@@ -365,6 +374,22 @@ fn write_ext_sections(
     file.write_all(&150u16.to_be_bytes())?; // entries_per_second
     file.write_all(&0x0305u16.to_be_bytes())?; // unknown2 (observed value)
     file.write_all(&waveforms.color_detail)?;
+
+    // --- PWV4 Section (color preview waveform) ---
+    // 1200 columns × 6 bytes per entry = 7200 bytes data
+    file.write_all(PWV4_MAGIC)?;
+    file.write_all(&PWV4_HEADER_SIZE.to_be_bytes())?;
+    file.write_all(&pwv4_section_len.to_be_bytes())?;
+    file.write_all(&PWV4_ENTRY_SIZE.to_be_bytes())?; // unknown1 (entry size = 6)
+    file.write_all(&PWV4_ENTRY_COUNT.to_be_bytes())?; // len_entries (1200)
+    file.write_all(&0u32.to_be_bytes())?; // unknown2 (0 in reference)
+    // Write color preview data
+    if waveforms.color_preview.len() == (PWV4_ENTRY_COUNT * PWV4_ENTRY_SIZE) as usize {
+        file.write_all(&waveforms.color_preview)?;
+    } else {
+        // Fallback: write zeros (as in reference)
+        file.write_all(&vec![0u8; (PWV4_ENTRY_COUNT * PWV4_ENTRY_SIZE) as usize])?;
+    }
 
     Ok(())
 }
