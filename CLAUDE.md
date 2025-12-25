@@ -2,8 +2,23 @@
 
 ## Current Status (2025-12-25)
 
-**Phase:** Waveforms (FIX IMPLEMENTED - READY FOR TESTING)
-**Status:** Root cause identified and fixed! PWV4 waveform generation was returning empty Vec instead of calling generate_pwv4(). Now generates actual waveform data.
+**Phase:** PDB Structure Fixes (READY FOR TESTING)
+**Status:** Fixed critical DeviceSQL issues that caused "corrupted database" errors for large exports (35+ tracks).
+
+### Fixes Applied Today:
+1. **File size bug** - File was hardcoded to 41 pages. Large exports need more pages for track data. Now dynamically allocates pages based on actual track count.
+2. **next_unused_page hardcoded** - Was set to 53 from reference, now correctly set to actual next available page.
+3. **Sequence field** - Now calculated based on total entities (tracks + artists + albums + genres + playlists).
+
+### Validation Results (35-track export):
+- ✅ File size aligned to page size (44 pages = 180,224 bytes)
+- ✅ All 20 table chains valid
+- ✅ Track table correctly links pages: 1 → 2 → 41 → 42 → 43
+- ✅ rekordcrate successfully parses all pages
+- ✅ All page types match their tables
+
+### Previous Fix (PWV4 Waveform):
+PWV4 waveform generation was returning empty Vec instead of calling generate_pwv4(). Now generates actual waveform data.
 
 ---
 

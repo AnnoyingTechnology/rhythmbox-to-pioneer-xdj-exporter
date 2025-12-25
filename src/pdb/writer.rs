@@ -63,9 +63,8 @@ const TABLE_SEQUENCE: [TableType; 20] = [
     TableType::History,
 ];
 
-// Reference export uses 41 pages, with next_unused_page pointing to page 53
-// (empty candidate pages 41-52 don't actually exist in file but are pointer values)
-const REFERENCE_NEXT_UNUSED_PAGE: u32 = 53;
+// Reference export uses 41 pages (pages 0-40)
+// Empty candidate pages (41-52) are just pointer values, they don't need to exist in file
 
 const TABLE_LAYOUTS: &[TableLayout] = &[
     // Tables with data (header + data page)
@@ -157,10 +156,12 @@ pub fn write_pdb(
         next_alloc_page += 1;
     }
 
-    // File size: 41 pages for reference-compatible export (pages 0-40)
-    // Empty candidate pages (41-52) don't need to exist in the file
-    let file_page_count = 41u32;
+    // File size must include all allocated pages
+    // Base layout uses pages 0-40 (41 pages)
+    // Additional track pages are allocated starting at page 41
+    let file_page_count = next_alloc_page.max(41);
     file.set_len((file_page_count as u64) * PAGE_SIZE as u64)?;
+    log::debug!("PDB file size: {} pages ({} bytes)", file_page_count, file_page_count * PAGE_SIZE);
 
     log::debug!("Tracks: {} total, {} chunks, pages: {:?}",
         tracks.len(), track_chunks.len(), &track_data_pages[..track_chunks.len()]);
@@ -574,16 +575,16 @@ pub fn write_pdb(
     }
 
     // Patch header metadata
-    // 0x0c: next_unused_page (53 = 0x35 in reference)
+    // 0x0c: next_unused_page - points to the next allocatable page
     // 0x10: unknown (5 in reference)
-    // 0x14: sequence - scales with tracks (observed: 1 track=14, 3 tracks=31, 20 tracks=108)
-    //       Formula: 14 + (tracks - 1) * 5 (approximately)
-    let sequence = if tracks.is_empty() { 14u32 } else { 14 + ((tracks.len() as u32 - 1) * 5) };
+    // 0x14: sequence - scales with content (observed: 1 track=14, 3 tracks=31, 20 tracks=108)
+    let total_entities = tracks.len() + entities.artists.len() + entities.albums.len() + entities.genres.len() + playlists.len();
+    let sequence = 14u32 + (total_entities as u32 * 3);
     file.seek(SeekFrom::Start(0x0c))?;
-    file.write_all(&REFERENCE_NEXT_UNUSED_PAGE.to_le_bytes())?;
+    file.write_all(&file_page_count.to_le_bytes())?;
     file.write_all(&5u32.to_le_bytes())?;
     file.write_all(&sequence.to_le_bytes())?;
-    log::debug!("PDB sequence: {} (tracks: {})", sequence, tracks.len());
+    log::debug!("PDB next_unused_page: {}, sequence: {} (entities: {})", file_page_count, sequence, total_entities);
 
     log::info!("PDB file written successfully");
     Ok(())
