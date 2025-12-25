@@ -1,9 +1,137 @@
 # Pioneer Exporter Implementation Strategy
 
-## Current Status (2025-12-24)
+## Current Status (2025-12-25)
 
-**Phase:** Waveforms (FIXED - NEEDS TESTING)
-**Status:** Waveform generation fixed. Previous bug caused all heights=0. Now generating proper waveform data with correct whiteness values (PWAV=5, PWV3=7). Needs verification on XDJ-XZ.
+**Phase:** Waveforms (DEBUGGING - Expert Analysis Complete)
+**Status:** Waveform data generation implemented but NOT displaying on XDJ-XZ. Four expert opinions analyzed - PWV4 zeros identified as primary suspect. Battle plan created.
+
+---
+
+## Expert Analysis Summary (2025-12-25)
+
+Consulted 4 experts on the waveform display issue. Key insights consolidated below.
+
+### Consensus: PWV4 All-Zeros is the #1 Suspect
+
+All experts agree that **PWV4 (color preview waveform) being all zeros is likely the root cause**.
+
+- XDJ-XZ is a Nexus 2-era device that relies heavily on PWV4 for the scrolling waveform overview
+- If PWV4 is present but "empty" (all zeros), firmware may treat waveform analysis as **missing/invalid** and hide waveform UI entirely (no fallback to monochrome)
+- Reference-1 has 3178 non-zero bytes in PWV4; ours has 7200 zeros
+
+**PWV4 Structure (6 bytes per entry, 1200 entries):**
+```
+Channel 0: Unknown (affects blue waveform whiteness) - try 0x40
+Channel 1: Luminance boost - CRITICAL: MUST be non-zero (try 0x60)
+Channel 2: Inverse intensity for blue - non-zero required (try 0x20)
+Channel 3: Red component (0-127)
+Channel 4: Green component (0-127)
+Channel 5: Blue component + height (0-127)
+```
+
+### Other High-Priority Issues Identified
+
+1. **Height values too low/zero** - Need minimum floor
+   - PWAV: Reference shows height=2 (`0xa2`), ours shows height=0 (`0xa0`)
+   - PWV2: Reference starts at `0x01`, ours starts at `0x00`
+   - Pioneer players may interpret zero heights as "uncalculated" or "silent"
+   - **Fix:** Clamp all heights to minimum 1-2, use log scaling
+
+2. **PWV5 all-white may be rejected**
+   - Ours: `ff80` (RGB=7,7,7, all white)
+   - Reference: `e000`, `0b80`, `0b84` (varied colors)
+   - Player may expect spectral coloring (lows→red, highs→blue)
+   - **Fix:** Implement frequency-based coloring or at least varied colors
+
+3. **Possible "Waveform Analyzed" bitmask in PDB**
+   - Track row offset 0x04-0x07 contains a bitmask
+   - Possible bit meanings: Bit 0=Beatgrid, Bit 1=Waveform, Bit 2=Key, Bit 3=Phrase
+   - If "Waveform" bit is 0, player may skip waveform rendering
+   - **Fix:** Compare our bitmask with reference; ensure bit 1 is set
+
+4. **PVBR trailing bytes differ**
+   - Reference: `d3 80` (VBR timing data)
+   - Ours: `00 00`
+   - May participate in "analysis validity / needle search safety" check
+   - **Fix:** Copy PVBR bytes from reference as a test
+
+### Key Diagnostic Test (All Experts Recommend)
+
+**"Reference Injection Test" - Isolates Data vs PDB issue:**
+
+1. Keep our generated `export.pdb` (points to our path P9CC/00C30E0D)
+2. Copy **Reference ANLZ files** (from P05C/0001D2C0) into our path
+3. Test on XDJ-XZ:
+   - **YES waveforms** → Our PDB is fine; our waveform DATA is the problem
+   - **NO waveforms** → Problem is in PDB flags/validation, not ANLZ data
+
+This single test will eliminate half the possibilities.
+
+### Other Ideas to Explore
+
+- **Omit PWV4 entirely** (don't zero-fill) - forces fallback to monochrome?
+- **Test with longer tracks** - 1-second sample may be too short (185 entries at 150/sec = 1.23s min)
+- **exportExt.pdb ID mismatch** - Static copy may have wrong track IDs
+- **Unknown PMAI header bytes (12-27)** - Could be checksums/flags
+- **Firmware quirk** - XDJ-XZ specific; test on different hardware if possible
+
+---
+
+## Battle Plan: Waveform Fix (2025-12-25)
+
+### Phase A: Diagnostic Tests (No Code Changes)
+
+| # | Test | Expected Result | If YES | If NO |
+|---|------|-----------------|--------|-------|
+| A1 | Reference Injection: Copy reference ANLZ files to our path | Waveforms display | Data issue | PDB issue |
+| A2 | Omit PWV4 entirely from EXT file | Fallback to PWAV? | PWV4 zeros = fatal | Structure issue |
+| A3 | Use reference ANLZ path (P05C/0001D2C0) in our PDB | Waveforms display | Path calculation issue | Other PDB issue |
+
+**A1 RESULT (2025-12-25): NO WAVEFORMS** → Problem is in PDB, not ANLZ data!
+- Copied reference ANLZ files to our path P9CC/00C30E0D
+- Our PDB + reference ANLZ = still no waveforms
+- This proves the issue is a PDB flag or field, not waveform encoding
+
+### Phase B: PWV4 Fixes (Primary Suspect)
+
+| # | Fix | Details |
+|---|-----|---------|
+| B1 | Generate minimal non-zero PWV4 | Channels 0-5: `[0x40, 0x60, 0x20, 0x7F, 0x7F, 0x7F]` per entry |
+| B2 | Copy reference PWV4 data | Hex-copy 7200 bytes from reference EXT |
+| B3 | Implement proper PWV4 generation | FFT-based spectral coloring |
+
+### Phase C: Height/Amplitude Fixes
+
+| # | Fix | Details |
+|---|-----|---------|
+| C1 | Add height floor to all waveforms | `height = max(1, computed_height)` |
+| C2 | Scale heights by 4-5x | Match reference range (2-22 vs our 0-5) |
+| C3 | Use log scaling instead of linear | Matches Rekordbox's visual style |
+
+### Phase D: Other Data Fixes
+
+| # | Fix | Details |
+|---|-----|---------|
+| D1 | Implement varied PWV5 colors | Frequency-based RGB, not all white |
+| D2 | Copy PVBR from reference | Test if it participates in validation |
+| D3 | Match unknown2 string | Change "4" to "3" |
+
+### Phase E: PDB Investigation
+
+| # | Fix | Details |
+|---|-----|---------|
+| E1 | Check bitmask at track row 0x04-0x07 | Ensure "Waveform" bit is set |
+| E2 | Generate dynamic exportExt.pdb | Avoid static copy ID mismatch |
+| E3 | Binary diff entire export.pdb | Find any remaining differences |
+
+### Recommended Order of Execution
+
+1. **A1** (Reference Injection) - Most valuable diagnostic, takes 5 minutes
+2. **A2** (Omit PWV4) - Quick test to confirm PWV4 zeros are fatal
+3. **B2** (Copy reference PWV4) - If A1 shows data issue
+4. **C1 + C2** (Height fixes) - Easy code changes
+5. **B1** (Minimal PWV4) - If B2 works, implement proper generation
+6. **E1** (Bitmask check) - If A1 shows PDB issue
 
 ---
 
@@ -82,17 +210,19 @@ Dependencies:
 - [x] FAT32 path component sanitization (truncation to 200 chars)
 - [x] `--max-parallel` CLI option to limit concurrent analyses (memory optimization)
 
-### Phase 3 - Waveforms (FIXED - NEEDS XDJ-XZ TESTING)
+### Phase 3 - Waveforms (IN PROGRESS - See Battle Plan)
 - [x] PWAV waveform preview (400 bytes, monochrome) - .DAT file
 - [x] PWV2 tiny preview (100 bytes) - .DAT file
 - [x] PWV3 waveform detail (150 entries/sec, monochrome) - .EXT file
 - [x] PWV5 color waveform detail (150 entries/sec, 2 bytes/entry) - .EXT file
-- [x] PWV4 color preview (1200 columns × 6 bytes) - .EXT file (zeros, like reference)
+- [ ] **PWV4 color preview** - Currently all zeros (SUSPECTED ROOT CAUSE)
 - [x] **ExportExt.pdb with reference data** (copied from reference-1)
 - [x] **StubAnalyzer fix** - now generates actual waveforms instead of empty stubs
 - [x] **Whiteness/height encoding fix** - PWAV uses whiteness=5, PWV3 uses whiteness=7
+- [ ] **Height floor/scaling** - Heights too low (0-5 vs reference 2-22)
+- [ ] **PWV5 varied colors** - Currently all white, may need frequency-based coloring
 - [ ] PWV6/PWV7 3-band waveforms (CDJ-3000) - not needed for XDJ-XZ
-- [ ] **VERIFY ON XDJ-XZ** - waveforms should now display
+- [ ] **WAVEFORMS NOT DISPLAYING** - See Battle Plan above for next steps
 
 ---
 
@@ -185,12 +315,12 @@ cargo run --release -- --output /tmp/test-single --playlist "REKORDBOX4" --no-bp
 
 ---
 
-Waveform encoding (as implemented - FIXED 2025-12-24):
+Waveform encoding (as implemented - NEEDS FIXES 2025-12-25):
 - PWAV: height (5 low bits) | whiteness (3 high bits) - whiteness=5 like reference
-- PWV2: height (4 bits) - simple peak amplitude
+- PWV2: height (4 bits) - simple peak amplitude **⚠️ NEEDS MIN FLOOR**
 - PWV3: height (5 low bits) | whiteness (3 high bits) - whiteness=7 like reference
-- PWV5: RGB (3 bits each) | height (5 bits) - always white (7,7,7)
-- PWV4: 1200 entries × 6 bytes - zeros (reference has data but not required)
+- PWV5: RGB (3 bits each) | height (5 bits) - always white (7,7,7) **⚠️ NEEDS VARIED COLORS**
+- PWV4: 1200 entries × 6 bytes - ALL ZEROS **⚠️ SUSPECTED ROOT CAUSE - NEEDS NON-ZERO DATA**
 
 Implementation:
 - Uses symphonia to decode audio to mono samples
