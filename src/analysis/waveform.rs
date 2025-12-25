@@ -54,12 +54,12 @@ pub fn generate_waveforms(audio_path: &Path, _duration_ms: u32) -> Result<Wavefo
     let preview = generate_pwav(&samples, sample_rate);
     let tiny_preview = generate_pwv2(&samples, sample_rate);
     let detail = generate_pwv3(&samples, sample_rate);
-    // PWV4: Reference exports have all zeros - XDJ-XZ doesn't need non-zero data
-    let color_preview = Vec::new(); // Will be written as zeros by ANLZ writer
+    // PWV4: Color preview waveform for needle search and jogwheel display
+    let color_preview = generate_pwv4(&samples, sample_rate);
     let color_detail = generate_pwv5(&samples, sample_rate);
 
     log::info!(
-        "Waveforms generated: PWAV={}, PWV2={}, PWV3={}, PWV4={} (zeros), PWV5={} bytes",
+        "Waveforms generated: PWAV={}, PWV2={}, PWV3={}, PWV4={}, PWV5={} bytes",
         preview.len(),
         tiny_preview.len(),
         detail.len(),
@@ -186,53 +186,64 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 
 /// Generate PWV4 color preview waveform (1200 entries × 6 bytes = 7200 bytes)
 ///
-/// PWV4 is critical for XDJ-XZ waveform display! Each 6-byte entry:
-/// - Channel 0: Unknown (0x40)
-/// - Channel 1: Luminance boost - MUST be non-zero for waveform to display
-/// - Channel 2: Inverse intensity for blue waveform mode
-/// - Channels 3-5: Red, Green, Blue components (0-127)
+/// PWV4 is used for needle search and jogwheel display on XDJ-XZ.
+/// Each 6-byte entry has 3 columns (low/mid/high frequency bands):
+/// - Bytes 0-1: Low frequency (height, whiteness)
+/// - Bytes 2-3: Mid frequency (height, whiteness)
+/// - Bytes 4-5: High frequency (height, whiteness)
+///
+/// Height values are 0-31 (5 bits), whiteness around 0xF0-0xFF when signal present.
 fn generate_pwv4(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
     let samples_per_column = samples.len() / PWV4_COLUMNS;
+
+    if samples_per_column == 0 {
+        // Track too short - return zeros like reference does for intro/outro silence
+        return vec![0u8; PWV4_COLUMNS * 6];
+    }
 
     let mut result = Vec::with_capacity(PWV4_COLUMNS * 6);
 
     for col in 0..PWV4_COLUMNS {
         let start = col * samples_per_column;
-        let end = if samples_per_column > 0 {
-            ((col + 1) * samples_per_column).min(samples.len())
-        } else {
-            0
-        };
+        let end = ((col + 1) * samples_per_column).min(samples.len());
 
-        let (rms, peak) = if start < end && end <= samples.len() {
-            calculate_rms_and_peak(&samples[start..end])
-        } else {
-            (0.1, 0.1) // Default to small non-zero value
-        };
+        if start >= samples.len() {
+            // Silence for remaining columns
+            result.extend_from_slice(&[0u8; 6]);
+            continue;
+        }
 
-        // Scale peak to 0-127 range for PWV4 channels
-        let intensity = ((peak * 127.0).min(127.0) as u8).max(1);
-        let rms_scaled = ((rms * 127.0).min(127.0) as u8).max(1);
+        let chunk = &samples[start..end];
+        let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Channel 0: Unknown - use 0x40 like reference
-        result.push(0x40);
+        // If near silence, output zeros
+        if peak < 0.01 {
+            result.extend_from_slice(&[0u8; 6]);
+            continue;
+        }
 
-        // Channel 1: Luminance boost - CRITICAL: must be non-zero
-        // Higher values = brighter waveform
-        result.push(intensity.max(0x20));
+        // Height based on peak (0-31)
+        let height = ((peak * 31.0).min(31.0) as u8).max(1);
 
-        // Channel 2: Inverse intensity for blue waveform mode
-        result.push(rms_scaled.max(0x10));
+        // Whiteness high when signal present (0xF0-0xFF range in reference)
+        // Use RMS-to-peak ratio to determine whiteness
+        let whiteness = 0xF0u8 + ((rms / peak.max(0.001)) * 15.0).min(15.0) as u8;
 
-        // Channels 3-5: RGB color based on intensity
-        // Simple coloring: louder = more red/white, quieter = more blue
-        let red = intensity;
-        let green = (intensity as u16 * 3 / 4) as u8;
-        let blue = (intensity as u16 / 2) as u8;
+        // For simplicity, put most energy in low-frequency column (column 1)
+        // This matches reference behavior for voice/most audio content
+        // Column 1: Low frequencies (primary energy)
+        result.push(height);
+        result.push(whiteness);
 
-        result.push(red.max(0x10));
-        result.push(green.max(0x10));
-        result.push(blue.max(0x10));
+        // Column 2: Mid frequencies (usually lower for voice)
+        let mid_height = (height as u16 / 3) as u8;
+        result.push(mid_height);
+        result.push(if mid_height > 0 { whiteness } else { 0 });
+
+        // Column 3: High frequencies (usually lowest)
+        let high_height = (height as u16 / 5) as u8;
+        result.push(high_height);
+        result.push(if high_height > 0 { whiteness } else { 0 });
     }
 
     log::debug!("PWV4: {} entries, {} bytes", PWV4_COLUMNS, result.len());

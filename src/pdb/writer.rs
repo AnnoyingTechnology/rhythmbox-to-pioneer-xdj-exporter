@@ -204,9 +204,18 @@ pub fn write_pdb(
                         layout.empty_candidate
                     };
 
-                    // Page parameters based on reference export
-                    let page_unknown1 = 0x001cu32;  // Matches reference: 0x1c
-                    let unknown4 = 0x00u8;  // Matches reference: 0x00
+                    // Page parameters based on reference exports
+                    // Observed pattern: 1 track=0x0b, 3 tracks=0x1c, 11 tracks=0x3c
+                    // Approximate: base 0x0b + (rows-1) * 5 (clamped to reasonable values)
+                    let page_unknown1 = match track_chunk.len() {
+                        0..=1 => 0x0bu32,
+                        2..=3 => 0x1cu32,
+                        4..=6 => 0x28u32,
+                        7..=10 => 0x34u32,
+                        _ => 0x3cu32, // 11+ tracks
+                    };
+                    // unknown4: 0x00 for small pages, 0x01 when page is getting full (11+ tracks)
+                    let unknown4 = if track_chunk.len() >= 11 { 0x01u8 } else { 0x00u8 };
 
                     seek_to_page(&mut file, page_num)?;
                     write_tracks_table(
@@ -564,14 +573,17 @@ pub fn write_pdb(
         )?;
     }
 
-    // Patch header metadata to match reference export
+    // Patch header metadata
     // 0x0c: next_unused_page (53 = 0x35 in reference)
     // 0x10: unknown (5 in reference)
-    // 0x14: sequence (31 = 0x1f in reference)
+    // 0x14: sequence - scales with tracks (observed: 1 track=14, 3 tracks=31, 20 tracks=108)
+    //       Formula: 14 + (tracks - 1) * 5 (approximately)
+    let sequence = if tracks.is_empty() { 14u32 } else { 14 + ((tracks.len() as u32 - 1) * 5) };
     file.seek(SeekFrom::Start(0x0c))?;
     file.write_all(&REFERENCE_NEXT_UNUSED_PAGE.to_le_bytes())?;
     file.write_all(&5u32.to_le_bytes())?;
-    file.write_all(&31u32.to_le_bytes())?;  // Match reference sequence
+    file.write_all(&sequence.to_le_bytes())?;
+    log::debug!("PDB sequence: {} (tracks: {})", sequence, tracks.len());
 
     log::info!("PDB file written successfully");
     Ok(())
@@ -1332,7 +1344,8 @@ fn write_tracks_table(
         next_page,
         num_rows_small,
         num_rows_large,
-        0x60,      // unknown3 - matches reference (0x60)
+        // unknown3: 0x20 for 1 track, 0x60 for 2+ tracks (observed pattern)
+        if tracks.len() <= 1 { 0x20u8 } else { 0x60u8 },
         unknown4,  // unknown4 - 0x00 from reference
         0x24,      // page_flags
         page_unknown1,
