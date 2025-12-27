@@ -2,17 +2,31 @@
 
 This document covers waveform generation for Pioneer USB exports.
 
-## Current Status (2025-12-26)
+## Current Status (2025-12-27)
 
-**Status:** NOT working on XDJ-XZ
+**Status:** TESTING NEEDED on XDJ-XZ (Height normalization fixed)
 
 ### What Works
-- Some monochrome preview display in Rekordbox 5 (when the export is not corrupted).
-- When swapping with our ANLZ000.EXT in a reference export, we have ONE waveform displayed on the XDJ
+- Monochrome preview display in Rekordbox 5
+- Main screen waveform displays when swapping EXT in reference export
+
+### Recent Fixes (2025-12-27)
+
+#### 1. Height Normalization Fix
+**Root cause:** Heights were using raw peak values (0.0-1.0) instead of normalizing to the track's maximum peak.
+- Before: Heights 1-11 (compressed, flat appearance)
+- After: Heights 0-31 (full dynamic range)
+
+**Solution:** All waveform generators now receive `overall_peak` parameter and normalize heights relative to it, ensuring the loudest part of the track reaches max height.
+
+#### 2. PWV4 Color Encoding Fix
+Fixed PWV4 (color preview) encoding for needle search waveform:
+- Height range: Changed from 0-31 (5-bit) to 0-127 (full 8-bit)
+- Color encoding: Low freq now uses HIGH color values (0xE0-0xFF), Mid/High use LOW values (0x01-0x30)
 
 ### Known Limitations
-- PWV5 colors are all white (no frequency-based coloring)
-- Heights may be lower than Rekordbox-generated waveforms
+- PWV5 colors use crest-factor based coloring (may differ from Rekordbox)
+- Heights normalized to our audio analysis (slight differences from Rekordbox)
 
 ---
 
@@ -49,9 +63,11 @@ whiteness = 7 (like reference)
 
 ### PWV4 (Color Preview - 3 Frequency Bands)
 Each 6-byte entry has 3 columns for frequency bands (low/mid/high):
-- Bytes 0-1: Low frequency (height 0-31, whiteness 0xF0-0xFF)
-- Bytes 2-3: Mid frequency (height, whiteness)
-- Bytes 4-5: High frequency (height, whiteness)
+- Bytes 0-1: Low frequency (height 0-127, color 0xE0-0xFF = bright)
+- Bytes 2-3: Mid frequency (height 0-127, color 0x01-0x30 = dim)
+- Bytes 4-5: High frequency (height 0-127, color 0x01-0x20 = dimmer)
+
+Height uses FULL 8-bit range (0-127 typical), NOT 5-bit like PWAV/PWV3.
 
 ### PWV5 (Color Detail)
 ```
@@ -92,6 +108,34 @@ When using `--no-bpm --no-key`, the StubAnalyzer was returning `WaveformData::mi
 ### Whiteness/Height Fix
 - PWAV now uses whiteness=5 (was 7)
 - PWV3 now uses whiteness=7 (was 5)
+
+### PWV4 Format Fix (Fixed 2025-12-27)
+**Root cause:** PWV4 was using wrong encoding - heights capped at 31 and all colors set to 0xF0+.
+Reference analysis showed:
+- Heights should be 0-127 (full 8-bit), not 0-31
+- Low frequency color should be HIGH (0xE0-0xFF = bright)
+- Mid/High frequency colors should be LOW (0x01-0x30 = dim)
+
+### Height Normalization Fix (Fixed 2025-12-27)
+**Root cause:** All waveform generators were using raw peak amplitude values (0.0-1.0) directly instead of normalizing to the track's maximum peak.
+
+For the Fresh.mp3 test track:
+- Decoded peak amplitude: 0.3725
+- Before fix: heights 1-11 (0.3725 * 31 = 11)
+- After fix: heights 0-31 (normalized so 0.3725 maps to 31)
+
+**Analysis comparing reference vs ours:**
+```
+Reference PWV3 heights: 0-31 range (loudest parts hit 31)
+Our PWV3 heights before: 1-11 range (compressed, flat)
+Our PWV3 heights after: 0-31 range (full dynamic range)
+```
+
+**Fix:** All waveform generators now receive `overall_peak` parameter and calculate:
+```rust
+let normalized_peak = peak / overall_peak;
+let height = (normalized_peak * MAX_HEIGHT as f32) as u8;
+```
 
 ---
 

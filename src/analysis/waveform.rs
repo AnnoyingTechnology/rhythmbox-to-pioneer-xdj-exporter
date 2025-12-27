@@ -40,8 +40,11 @@ pub fn generate_waveforms(audio_path: &Path, _duration_ms: u32) -> Result<Wavefo
 
     let duration_secs = samples.len() as f32 / sample_rate as f32;
 
-    // Find overall peak for debugging
+    // Find overall peak for normalization - waveform heights are scaled relative to this
+    // This ensures the loudest part of the track reaches max height (31 for 5-bit)
     let overall_peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    let overall_peak = overall_peak.max(0.001); // Avoid division by zero
+
     log::debug!(
         "Decoded {} samples ({:.1}s) at {}Hz, peak amplitude: {:.4}",
         samples.len(),
@@ -50,13 +53,13 @@ pub fn generate_waveforms(audio_path: &Path, _duration_ms: u32) -> Result<Wavefo
         overall_peak
     );
 
-    // Generate each waveform type
-    let preview = generate_pwav(&samples, sample_rate);
-    let tiny_preview = generate_pwv2(&samples, sample_rate);
-    let detail = generate_pwv3(&samples, sample_rate);
+    // Generate each waveform type, passing overall_peak for normalization
+    let preview = generate_pwav(&samples, sample_rate, overall_peak);
+    let tiny_preview = generate_pwv2(&samples, sample_rate, overall_peak);
+    let detail = generate_pwv3(&samples, sample_rate, overall_peak);
     // PWV4: Color preview waveform for needle search and jogwheel display
-    let color_preview = generate_pwv4(&samples, sample_rate);
-    let color_detail = generate_pwv5(&samples, sample_rate);
+    let color_preview = generate_pwv4(&samples, sample_rate, overall_peak);
+    let color_detail = generate_pwv5(&samples, sample_rate, overall_peak);
 
     log::info!(
         "Waveforms generated: PWAV={}, PWV2={}, PWV3={}, PWV4={}, PWV5={} bytes",
@@ -79,7 +82,8 @@ pub fn generate_waveforms(audio_path: &Path, _duration_ms: u32) -> Result<Wavefo
 /// Generate PWAV monochrome preview (400 bytes)
 ///
 /// Each byte encodes: height (5 low bits, 0-31) + whiteness (3 high bits, 0-7)
-fn generate_pwav(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
+/// Heights are normalized relative to overall_peak so the loudest part reaches max height.
+fn generate_pwav(samples: &[f32], _sample_rate: u32, overall_peak: f32) -> Vec<u8> {
     let samples_per_column = samples.len() / PWAV_COLUMNS;
     if samples_per_column == 0 {
         // Audio too short, return flat waveform
@@ -98,8 +102,10 @@ fn generate_pwav(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
         // Calculate RMS and peak for this window
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-31), with minimum floor of 1 to avoid "empty" waveform
-        let height = ((peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
+        // Normalize peak relative to track's overall peak, then scale to 0-31
+        // This ensures the loudest part of the track reaches height 31
+        let normalized_peak = peak / overall_peak;
+        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(0);
 
         if peak > max_peak {
             max_peak = peak;
@@ -127,7 +133,8 @@ fn generate_pwav(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
 /// Generate PWV2 tiny preview (100 bytes)
 ///
 /// Each byte uses 4 low bits for height (0-15)
-fn generate_pwv2(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
+/// Heights are normalized relative to overall_peak.
+fn generate_pwv2(samples: &[f32], _sample_rate: u32, overall_peak: f32) -> Vec<u8> {
     let samples_per_column = samples.len() / PWV2_COLUMNS;
     if samples_per_column == 0 {
         return vec![8; PWV2_COLUMNS]; // Flat waveform at half height
@@ -142,8 +149,9 @@ fn generate_pwv2(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
 
         let (_, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-15), with minimum floor of 1
-        let height = ((peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8).max(1);
+        // Normalize peak relative to track's overall peak, then scale to 0-15
+        let normalized_peak = peak / overall_peak;
+        let height = ((normalized_peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8).max(0);
         result.push(height);
     }
 
@@ -153,7 +161,8 @@ fn generate_pwv2(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
 /// Generate PWV3 monochrome detail waveform (150 entries/sec)
 ///
 /// Same encoding as PWAV: height (5 bits) + whiteness (3 bits)
-fn generate_pwv3(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+/// Heights are normalized relative to overall_peak.
+fn generate_pwv3(samples: &[f32], sample_rate: u32, overall_peak: f32) -> Vec<u8> {
     let duration_secs = samples.len() as f32 / sample_rate as f32;
     let num_entries = (duration_secs * DETAIL_ENTRIES_PER_SEC).ceil() as usize;
     let samples_per_entry = samples.len() / num_entries.max(1);
@@ -171,8 +180,9 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-31), with minimum floor of 1
-        let height = ((peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
+        // Normalize peak relative to track's overall peak, then scale to 0-31
+        let normalized_peak = peak / overall_peak;
+        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(0);
 
         // Whiteness=7 for PWV3 (unlike PWAV which uses 5)
         // Reference files consistently use whiteness=7 for detail waveforms
@@ -187,13 +197,17 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 /// Generate PWV4 color preview waveform (1200 entries × 6 bytes = 7200 bytes)
 ///
 /// PWV4 is used for needle search and jogwheel display on XDJ-XZ.
-/// Each 6-byte entry has 3 columns (low/mid/high frequency bands):
-/// - Bytes 0-1: Low frequency (height, whiteness)
-/// - Bytes 2-3: Mid frequency (height, whiteness)
-/// - Bytes 4-5: High frequency (height, whiteness)
+/// Each 6-byte entry has 3 frequency bands:
+/// - Bytes 0-1: Low frequency (height 0-127, color 0xE0-0xFF)
+/// - Bytes 2-3: Mid frequency (height 0-127, color 0x01-0x30)
+/// - Bytes 4-5: High frequency (height 0-127, color 0x01-0x20)
 ///
-/// Height values are 0-31 (5 bits), whiteness around 0xF0-0xFF when signal present.
-fn generate_pwv4(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
+/// Reference analysis shows:
+/// - Heights use full 8-bit range (typically 0-127)
+/// - Low frequency color values are HIGH (0xE0-0xFF = brighter)
+/// - Mid/High frequency color values are LOW (0x01-0x30 = dimmer)
+/// Heights are normalized relative to overall_peak.
+fn generate_pwv4(samples: &[f32], _sample_rate: u32, overall_peak: f32) -> Vec<u8> {
     let samples_per_column = samples.len() / PWV4_COLUMNS;
 
     if samples_per_column == 0 {
@@ -217,33 +231,45 @@ fn generate_pwv4(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
         // If near silence, output zeros
-        if peak < 0.01 {
+        if peak < 0.001 {
             result.extend_from_slice(&[0u8; 6]);
             continue;
         }
 
-        // Height based on peak (0-31)
-        let height = ((peak * 31.0).min(31.0) as u8).max(1);
+        // Normalize peak relative to track's overall peak, then scale to 0-127
+        let normalized_peak = peak / overall_peak;
+        let low_height = ((normalized_peak * 127.0).min(127.0) as u8).max(0);
 
-        // Whiteness high when signal present (0xF0-0xFF range in reference)
-        // Use RMS-to-peak ratio to determine whiteness
-        let whiteness = 0xF0u8 + ((rms / peak.max(0.001)) * 15.0).min(15.0) as u8;
+        // Low frequency color: HIGH value (0xE0-0xFF) - brighter display
+        // Varies based on RMS/peak ratio (sustain = brighter)
+        let sustain_factor = rms / peak.max(0.001);
+        let low_color = 0xE0u8 + ((sustain_factor * 31.0).min(31.0) as u8);
 
-        // For simplicity, put most energy in low-frequency column (column 1)
-        // This matches reference behavior for voice/most audio content
-        // Column 1: Low frequencies (primary energy)
-        result.push(height);
-        result.push(whiteness);
+        // Mid frequency: typically 60-80% of low, with LOW color values
+        let mid_height = ((low_height as f32 * 0.7) as u8).max(if low_height > 10 { 1 } else { 0 });
+        let mid_color = if mid_height > 0 {
+            // Reference shows mid color in 0x01-0x30 range
+            ((sustain_factor * 48.0).min(48.0) as u8).max(1)
+        } else {
+            0
+        };
 
-        // Column 2: Mid frequencies (usually lower for voice)
-        let mid_height = (height as u16 / 3) as u8;
+        // High frequency: typically 30-50% of low, with LOW color values
+        let high_height = ((low_height as f32 * 0.4) as u8).max(if low_height > 15 { 1 } else { 0 });
+        let high_color = if high_height > 0 {
+            // Reference shows high color in 0x01-0x20 range
+            ((sustain_factor * 32.0).min(32.0) as u8).max(1)
+        } else {
+            0
+        };
+
+        // Write entry: [low_h, low_c, mid_h, mid_c, high_h, high_c]
+        result.push(low_height);
+        result.push(low_color);
         result.push(mid_height);
-        result.push(if mid_height > 0 { whiteness } else { 0 });
-
-        // Column 3: High frequencies (usually lowest)
-        let high_height = (height as u16 / 5) as u8;
+        result.push(mid_color);
         result.push(high_height);
-        result.push(if high_height > 0 { whiteness } else { 0 });
+        result.push(high_color);
     }
 
     log::debug!("PWV4: {} entries, {} bytes", PWV4_COLUMNS, result.len());
@@ -253,7 +279,8 @@ fn generate_pwv4(samples: &[f32], _sample_rate: u32) -> Vec<u8> {
 /// Generate PWV5 color detail waveform (150 entries/sec, 2 bytes each)
 ///
 /// Bit packing (big-endian): 3-bit red | 3-bit green | 3-bit blue | 5-bit height | 2 unused
-fn generate_pwv5(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+/// Heights are normalized relative to overall_peak.
+fn generate_pwv5(samples: &[f32], sample_rate: u32, overall_peak: f32) -> Vec<u8> {
     let duration_secs = samples.len() as f32 / sample_rate as f32;
     let num_entries = (duration_secs * DETAIL_ENTRIES_PER_SEC).ceil() as usize;
     let samples_per_entry = samples.len() / num_entries.max(1);
@@ -272,8 +299,9 @@ fn generate_pwv5(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Height based on peak (0-31), with minimum floor of 1
-        let height = ((peak * MAX_HEIGHT_PWV5 as f32).min(MAX_HEIGHT_PWV5 as f32) as u8).max(1);
+        // Normalize peak relative to track's overall peak, then scale to 0-31
+        let normalized_peak = peak / overall_peak;
+        let height = ((normalized_peak * MAX_HEIGHT_PWV5 as f32).min(MAX_HEIGHT_PWV5 as f32) as u8).max(0);
 
         // Color variation based on RMS/peak ratio (crest factor)
         // Reference files have varied colors - uniform white may be rejected as invalid
