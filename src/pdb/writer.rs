@@ -208,29 +208,17 @@ pub fn write_pdb(
                     }
 
                     let page_num = track_data_pages[chunk_idx];
-                    // Link to next page if there's a next chunk, otherwise point beyond file
-                    // Reference-84: last track page (63) has next=64 (next_unused_page - 1)
-                    // For small exports: use empty_candidate (51)
-                    // For large exports: use last_data_page + 1
+                    // Only link to next page if there's actually a next chunk to write
                     let next_page = if chunk_idx + 1 < track_chunks.len() {
                         track_data_pages[chunk_idx + 1]
-                    } else if track_chunks.len() > 1 {
-                        // Large export: point to page after last track data
-                        track_data_pages[track_chunks.len() - 1] + 1
                     } else {
                         layout.empty_candidate
                     };
 
-                    // Page parameters based on reference exports
-                    // Observed pattern: 1 track=0x0b, 3 tracks=0x1c, 11 tracks=0x3c
-                    // Approximate: base 0x0b + (rows-1) * 5 (clamped to reasonable values)
-                    let page_unknown1 = match track_chunk.len() {
-                        0..=1 => 0x0bu32,
-                        2..=3 => 0x1cu32,
-                        4..=6 => 0x28u32,
-                        7..=10 => 0x34u32,
-                        _ => 0x3cu32, // 11+ tracks
-                    };
+                    // Sequence: base 10 + (tracks_on_this_page - 1) * 5
+                    // For first page, use tracks in chunk; for subsequent pages, continue from previous
+                    let tracks_on_page = track_chunk.len();
+                    let sequence = 10u32 + (tracks_on_page.saturating_sub(1) as u32) * 5;
                     // unknown4: 0x00 for small pages, 0x01 when page is getting full (11+ tracks)
                     let unknown4 = if track_chunk.len() >= 11 { 0x01u8 } else { 0x00u8 };
 
@@ -241,7 +229,7 @@ pub fn write_pdb(
                         &entities,
                         page_num,
                         next_page,
-                        page_unknown1,
+                        sequence,
                         unknown4,
                         current_track_id,
                     )?;
@@ -446,6 +434,18 @@ pub fn write_pdb(
             }
             TableType::History => {
                 // History table - use reference data (XDJ requires populated history)
+                // History header values differ for 1-track vs 2+ tracks:
+                // 1 track: unk5=0x0001, num_rows_large=0x0000
+                // 2+ tracks: unk5=0x1fff, num_rows_large=0x1fff
+                // unk6 always 0x03ec, unk7 always 0x0001
+                let (unk5, num_rows_large) = if tracks.len() <= 1 {
+                    (0x0001u16, 0x0000u16)
+                } else {
+                    (0x1fffu16, 0x1fffu16)
+                };
+                // Sequence: base 10 + (tracks - 1) * 5
+                let sequence = 10u32 + (tracks.len().saturating_sub(1) as u32) * 5;
+
                 seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
@@ -453,15 +453,15 @@ pub fn write_pdb(
                     TableType::History as u32,
                     layout.data_pages[0],
                     0,
-                    0x1fff,
+                    num_rows_large,
                     0,
                     0,
                     0x64,
-                    0x12,
+                    sequence,
                     0,
-                    0x1fff,
-                    0x03ec,
-                    0x0001,
+                    unk5,
+                    0x03ec,  // unk6 always 0x03ec
+                    0x0001,  // unk7 always 0x0001
                 )?;
                 write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
@@ -469,6 +469,9 @@ pub fn write_pdb(
                 // Write reference data page (contains historical playback data)
                 seek_to_page(&mut file, layout.data_pages[0])?;
                 file.write_all(REFERENCE_HISTORY_PAGE)?;
+                // Patch the sequence value (at offset 0x10) to match current export
+                file.seek(std::io::SeekFrom::Start(layout.data_pages[0] as u64 * PAGE_SIZE as u64 + 0x10))?;
+                file.write_all(&sequence.to_le_bytes())?;
             }
             TableType::HistoryEntries => {
                 // HistoryEntries table - use reference data
@@ -569,12 +572,54 @@ pub fn write_pdb(
         }
     }
 
-    // Pages 41-52 are reserved for empty_candidate pointers in TABLE_LAYOUTS.
-    // Reference exports show these pages are ALL ZEROS (not pages with headers).
-    // The file is already zero-filled when created with set_len(), so we don't
-    // need to write anything here.
+    // If file extends beyond page 40, we need to write proper placeholder pages
+    // for empty_candidate pages 41-52. These pages may be reached by parsers
+    // following table chains (via next_page pointers), so they must have correct types.
     if file_page_count > 41 {
-        log::debug!("Pages 41-{} left as zeros (empty_candidate range)", file_page_count.min(52));
+        // Map of empty_candidate page -> table type
+        // (extracted from TABLE_LAYOUTS)
+        let empty_candidate_types: [(u32, u32); 12] = [
+            (41, 0x13), // History
+            (42, 0x06), // Colors
+            (43, 0x10), // Columns
+            (44, 0x11), // HistoryPlaylists
+            (45, 0x12), // HistoryEntries
+            (46, 0x07), // PlaylistTree
+            (47, 0x02), // Artists
+            (48, 0x01), // Genres
+            (49, 0x03), // Albums
+            (50, 0x05), // Keys
+            (51, 0x00), // Tracks
+            (52, 0x08), // PlaylistEntries
+        ];
+
+        for (page_num, table_type) in empty_candidate_types.iter() {
+            if *page_num < file_page_count {
+                seek_to_page(&mut file, *page_num)?;
+                // Write a "strange" empty page with correct type
+                // page_flags 0x44 indicates a strange/empty page
+                write_page_header(
+                    &mut file,
+                    *page_num,
+                    *table_type,
+                    *page_num + 1, // next_page points to next empty candidate
+                    0,             // num_rows_small
+                    0x1fff,        // num_rows_large (0x1fff = header/strange page)
+                    0,
+                    0,
+                    0x44,          // page_flags for strange/empty page
+                    1,
+                    0,
+                    0x1fff,
+                    0,
+                    0,
+                )?;
+                // Pad to full page
+                let padding = PAGE_SIZE as usize - 0x28;
+                file.write_all(&vec![0u8; padding])?;
+            }
+        }
+        log::debug!("Wrote empty placeholder pages for 41-{}", file_page_count.min(52));
     }
 
     // Write table pointers back into the header
@@ -585,45 +630,31 @@ pub fn write_pdb(
         track_data_pages[track_chunks.len() - 1]
     };
 
-    // For large exports, empty_candidate for Tracks must point past last track data page
-    // Reference-84 pattern: last_page=63, empty_candidate=64, next_unused=65
-    let actual_track_empty_candidate = if track_chunks.len() > 1 {
-        actual_track_last_page + 1
-    } else {
-        TABLE_LAYOUTS[0].empty_candidate  // Use default (51) for small exports
-    };
-
     file.seek(SeekFrom::Start(0x1c))?;
     for layout in TABLE_LAYOUTS {
-        let (last_page, empty_candidate) = if layout.table == TableType::Tracks {
-            (actual_track_last_page, actual_track_empty_candidate)
+        let last_page = if layout.table == TableType::Tracks {
+            actual_track_last_page
         } else {
-            (layout.last_page, layout.empty_candidate)
+            layout.last_page
         };
         write_table_pointer(
             &mut file,
             layout.table as u32,
-            empty_candidate,
+            layout.empty_candidate,
             layout.header_page,
             last_page,
         )?;
     }
 
     // Patch header metadata
-    // 0x0c: next_unused_page - the next page that would be allocated
-    //       Reference patterns:
-    //       - Small exports (<=53 pages): next_unused = 53 (reserves empty_candidate range)
-    //       - Large exports: next_unused = actual_track_empty_candidate + 1
+    // 0x0c: next_unused_page - always 53 (points past empty_candidate pages 41-52)
+    //       Even if file is smaller, this reserves the empty_candidate range
     // 0x10: unknown (5 in reference)
     // 0x14: sequence - observed patterns:
     //       1 track: sequence=14
     //       3 tracks: sequence=31 (approximately 14 + tracks*3 + entities*3)
     //       For simplicity: use 14 for 1 track, scale for more
-    let next_unused_page = if track_chunks.len() > 1 {
-        actual_track_empty_candidate + 1  // Page after Tracks empty_candidate
-    } else {
-        53u32  // Reserve empty_candidate range for small exports
-    };
+    let next_unused_page = 53u32;  // Always 53, matching reference behavior
     let sequence = if tracks.len() <= 1 {
         14u32  // Match reference-1 exactly
     } else {
@@ -968,6 +999,13 @@ where
     Ok(())
 }
 
+/// Calculate unk3 (unknown3) for page headers based on row count.
+/// Formula: unk3 = (rows % 8) * 0x20
+/// This creates a cyclic pattern: 0x20, 0x40, 0x60, 0x80, 0xa0, 0xc0, 0xe0, 0x00
+fn calculate_unk3(rows: usize) -> u8 {
+    ((rows % 8) * 0x20) as u8
+}
+
 fn row_group_unknown_high_bit(flags: u16) -> u16 {
     // Full groups (all 16 slots used) have unknown=0
     // Partial groups have unknown = 2^highest_set_bit
@@ -1107,14 +1145,10 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if genres.is_empty() { 0 } else { (genres.len() - 1) as u16 };
 
-    // unknown1 and unknown3 vary based on track count (observed pattern):
-    // 1 track: unknown1=0x08, unknown3=0x20
-    // 3 tracks: unknown1=0x19, unknown3=0x60
-    let (unknown1, unknown3) = if track_count <= 1 {
-        (0x08u32, 0x20u8)
-    } else {
-        (0x19u32, 0x60u8)
-    };
+    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
+    let unknown3 = calculate_unk3(genres.len());
+    // Sequence: base 8 for genres + (track_count - 1) * 5
+    let sequence = 8u32 + (track_count.saturating_sub(1) as u32) * 5;
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1125,9 +1159,9 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
         num_rows_small,
         num_rows_large,
         unknown3,
-        0x00,  // Match reference
+        0x00,
         0x24,
-        unknown1,
+        sequence,
         0,
         0x0001,
         0,
@@ -1170,14 +1204,10 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if artists.is_empty() { 0 } else { (artists.len() - 1) as u16 };
 
-    // unknown1 and unknown3 vary based on track count (observed pattern):
-    // 1 track: unknown1=0x07, unknown3=0x20
-    // 3 tracks: unknown1=0x18, unknown3=0x60
-    let (unknown1, unknown3) = if track_count <= 1 {
-        (0x07u32, 0x20u8)
-    } else {
-        (0x18u32, 0x60u8)
-    };
+    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
+    let unknown3 = calculate_unk3(artists.len());
+    // Sequence: base 7 for artists + (track_count - 1) * 5
+    let sequence = 7u32 + (track_count.saturating_sub(1) as u32) * 5;
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1188,9 +1218,9 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
         num_rows_small,
         num_rows_large,
         unknown3,
-        0x00,  // Match reference
+        0x00,
         0x24,
-        unknown1,
+        sequence,
         0,
         0x0001,
         0,
@@ -1267,14 +1297,10 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if albums.is_empty() { 0 } else { (albums.len() - 1) as u16 };
 
-    // unknown1 and unknown3 vary based on track count (observed pattern):
-    // 1 track: unknown1=0x09, unknown3=0x20
-    // 3 tracks: unknown1=0x1a, unknown3=0x60
-    let (unknown1, unknown3) = if track_count <= 1 {
-        (0x09u32, 0x20u8)
-    } else {
-        (0x1au32, 0x60u8)
-    };
+    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
+    let unknown3 = calculate_unk3(albums.len());
+    // Sequence: base 9 for albums + (track_count - 1) * 5
+    let sequence = 9u32 + (track_count.saturating_sub(1) as u32) * 5;
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1287,7 +1313,7 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
         unknown3,
         0x00,
         0x24,
-        unknown1,
+        sequence,
         0,
         0x0001,
         0,
@@ -1414,6 +1440,9 @@ fn write_tracks_table(
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if tracks.is_empty() { 0 } else { (tracks.len() - 1) as u16 };
 
+    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
+    let unknown3 = calculate_unk3(tracks.len());
+
     let page_start = file.stream_position()?;
     write_page_header(
         file,
@@ -1422,9 +1451,8 @@ fn write_tracks_table(
         next_page,
         num_rows_small,
         num_rows_large,
-        // unknown3: 0x20 for 1 track, 0x60 for 2+ tracks (observed pattern)
-        if tracks.len() <= 1 { 0x20u8 } else { 0x60u8 },
-        unknown4,  // unknown4 - 0x00 from reference
+        unknown3,
+        unknown4,
         0x24,      // page_flags
         page_unknown1,
         0,
@@ -1684,12 +1712,30 @@ fn write_tracks_table(
 
         // For reference-matching, add extra padding to align rows to reference positions
         // Reference row offsets: 0x000, 0x158, 0x2B4 (for first 3 tracks)
+        // Reference single-track: used_size=332 (280 content + 52 padding)
         const REFERENCE_ROW_OFFSETS: &[usize] = &[0x000, 0x158, 0x2B4, 0x410]; // Add extra for potential 4th track
-        if idx + 1 < REFERENCE_ROW_OFFSETS.len() && idx + 1 < tracks.len() {
+        const SINGLE_ROW_SIZE: usize = 332; // Reference-1 single track used_size
+
+        if tracks.len() == 1 {
+            // Single track: pad to reference size
+            let current_pos = heap.len();
+            if SINGLE_ROW_SIZE > current_pos {
+                let padding = SINGLE_ROW_SIZE - current_pos;
+                heap.extend(std::iter::repeat(0u8).take(padding));
+            }
+        } else if idx + 1 < REFERENCE_ROW_OFFSETS.len() && idx + 1 < tracks.len() {
+            // Multiple tracks: pad between rows to align to reference positions
             let next_expected = REFERENCE_ROW_OFFSETS[idx + 1];
             let current_pos = heap.len();
             if next_expected > current_pos {
                 let padding = next_expected - current_pos;
+                heap.extend(std::iter::repeat(0u8).take(padding));
+            }
+        } else if idx + 1 == tracks.len() && tracks.len() > 1 {
+            // Last row in multi-track: also pad to ~344 bytes
+            let row_size = heap.len() - row_start;
+            if row_size < 344 {
+                let padding = 344 - row_size;
                 heap.extend(std::iter::repeat(0u8).take(padding));
             }
         }
@@ -1724,6 +1770,12 @@ fn write_playlist_tree_table(file: &mut File, playlists: &[Playlist], page_index
     let num_rows_small = num_rows.min(0xff) as u8;
     // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
     let num_rows_large = if playlists.is_empty() { 0 } else { (playlists.len() - 1) as u16 };
+
+    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on playlist count
+    let unknown3 = calculate_unk3(playlists.len());
+    // Sequence: base 6 + (playlists - 1)
+    let sequence = 6u32 + playlists.len().saturating_sub(1) as u32;
+
     write_page_header(
         file,
         page_index,
@@ -1731,10 +1783,10 @@ fn write_playlist_tree_table(file: &mut File, playlists: &[Playlist], page_index
         next_page,
         num_rows_small,
         num_rows_large,
-        0x60,  // Match reference (was 0x40)
+        unknown3,
         0x00,
         0x24,
-        0x08,  // Match reference (was 0x07)
+        sequence,
         0,
         0x0001,
         0,
@@ -1804,6 +1856,12 @@ fn write_playlist_entries_table(
 
     log::debug!("Writing playlist entries table: {} entries", total_entries);
 
+    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on entry count
+    let unknown3 = calculate_unk3(total_entries);
+    // Sequence: base 11 + (entries - 1) * 5
+    // This comes after all entity table writes (each track causes 5 table updates)
+    let sequence = 11u32 + (total_entries.saturating_sub(1) as u32) * 5;
+
     let page_start = file.stream_position()?;
     write_page_header(
         file,
@@ -1812,10 +1870,10 @@ fn write_playlist_entries_table(
         next_page,
         num_rows_small,
         num_rows_large,
-        0xc0,  // Match reference (was 0xa0)
-        0x00,  // Match reference (was 0x01)
+        unknown3,
+        0x00,
         0x24,
-        0x1d,  // Match reference (was 0x42)
+        sequence,
         0,
         0x0001,
         0,
