@@ -4,21 +4,15 @@
 
 | Export Type | Rekordbox 5 | XDJ-XZ | Notes |
 |-------------|-------------|--------|-------|
-| 1-10 tracks | **NEEDS TESTING** | ? | Table pointer fix applied |
-| 11-25 tracks | **NEEDS TESTING** | ? | Page 51 skip fix applied |
-| 88+ tracks | **NEEDS TESTING** | ? | Multi-overflow validated |
+| Small (1-10) | **WORKS** | **WORKS** | Validated |
+| Medium (11-35) | **WORKS** | **WORKS** | Keys + overflow working |
+| Large (88+) | **WORKS** | **WORKS** | Multi-overflow validated |
 
-### Recent Fix (2025-12-27): Page 51 Reservation
+### Page Allocation (with Keys)
 
-**Track overflow must skip page 51** (reserved for PlaylistEntries.empty_candidate).
-
-Correct overflow sequence: 50, 52, 53, 54... (never 51)
-
-### Previous Fix: Table Pointers
-
-- Tracks: empty_candidate 51→50
-- Keys: Now header-only (no data page), empty=12, last=11
-- PlaylistEntries: empty_candidate 52→51
+- **Keys**: page 12 (24 rows), empty=50
+- **Tracks**: empty=51, overflow at 51, 53, 54... (skips 52)
+- **PlaylistEntries**: empty=52
 
 ### What Works
 - USB recognition on XDJ-XZ

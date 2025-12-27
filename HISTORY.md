@@ -4,49 +4,43 @@ This file contains resolved issues and historical debugging context. See CLAUDE.
 
 ---
 
-## Session 2025-12-27: Page 51 Reservation Fix
+## Session 2025-12-27: Keys Table and Page Reservation Fix
 
-### Problem
-Exports with 11-20 tracks corrupted in Rekordbox 5. 11 tracks worked, 20 tracks failed.
+### Problem 1: Missing Keys
+After making Keys header-only, key detection was lost.
+
+### Problem 2: Page Conflicts
+Exports with 11-20 tracks corrupted. Track overflow conflicted with reserved pages.
 
 ### Root Cause
-**Track overflow pages were using page 51, which is reserved for PlaylistEntries.empty_candidate.**
-
-Our code allocated overflow pages sequentially: 50, 51, 52, 53...
-Reference exports skip page 51: 50, 52, 53, 54...
-
-```
-Our 20-track (BROKEN):
-  Tracks.last = 51
-  PlaylistEntries.empty_cand = 51  ← CONFLICT!
-  Track chain: 2 → 50 → 51 → 52
-
-Reference 20-track (WORKS):
-  Tracks.last = 50
-  PlaylistEntries.empty_cand = 51  ← Reserved, unused
-  Track chain: 2 → 50 → 52
-```
+Page allocation must account for ALL reserved empty_candidate pages:
+- Page 50: Keys.empty_candidate
+- Page 51: Tracks.empty_candidate (base)
+- Page 52: PlaylistEntries.empty_candidate
 
 ### Fix Applied (src/pdb/writer.rs)
+
+1. **Restored Keys table** with data page 12 (24 musical keys)
+2. **Updated table pointers**:
+   - Keys: data=[12], empty=50, last=12
+   - Tracks: empty=51
+   - PlaylistEntries: empty=52
+3. **Track overflow starts at 51, skips 52**:
 ```rust
-// Add overflow pages starting from page 50
-// IMPORTANT: Skip page 51 - it's reserved for PlaylistEntries.empty_candidate
-let mut next_alloc_page = 50u32;
+let mut next_alloc_page = 51u32;
 while track_data_pages.len() < track_chunks.len() {
     track_data_pages.push(next_alloc_page);
     next_alloc_page += 1;
-    // Skip page 51 (PlaylistEntries.empty_candidate)
-    if next_alloc_page == 51 {
-        next_alloc_page = 52;
+    if next_alloc_page == 52 {  // Skip PlaylistEntries.empty
+        next_alloc_page = 53;
     }
 }
 ```
 
 ### Result
-- 11-track: 2 → 50 → 52 ✅
-- 20-track: 2 → 50 → 52 → 53 ✅
-- 25-track: 2 → 50 → 52 → 53 ✅
-- Page 51 correctly left empty
+- Keys table has 24 rows on page 12 ✅
+- Track chain: 2 → 51 → 53 → 54 → ... (skips 52) ✅
+- 35-track export validated ✅
 
 ---
 

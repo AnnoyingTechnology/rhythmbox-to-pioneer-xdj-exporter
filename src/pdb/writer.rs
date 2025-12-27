@@ -139,19 +139,20 @@ const TABLE_SEQUENCE: [TableType; 20] = [
 
 const TABLE_LAYOUTS: &[TableLayout] = &[
     // Tables with data (header + data page)
-    // Tracks: empty_candidate=50 in reference (overflow starts at page 50)
-    TableLayout { table: TableType::Tracks, header_page: 1, data_pages: &[2], empty_candidate: 50, last_page: 2 },
+    // Tracks: empty_candidate=51 (Keys uses 50)
+    // Track overflow starts at 51, skips 52 (PlaylistEntries.empty)
+    TableLayout { table: TableType::Tracks, header_page: 1, data_pages: &[2], empty_candidate: 51, last_page: 2 },
     TableLayout { table: TableType::Genres, header_page: 3, data_pages: &[4], empty_candidate: 48, last_page: 4 },
     TableLayout { table: TableType::Artists, header_page: 5, data_pages: &[6], empty_candidate: 47, last_page: 6 },
     TableLayout { table: TableType::Albums, header_page: 7, data_pages: &[8], empty_candidate: 49, last_page: 8 },
     // Labels: empty table - header only, no data page (first==last in reference)
     TableLayout { table: TableType::Labels, header_page: 9, data_pages: &[], empty_candidate: 10, last_page: 9 },
-    // Keys: header-only in reference (first=11, last=11, empty=12)
-    TableLayout { table: TableType::Keys, header_page: 11, data_pages: &[], empty_candidate: 12, last_page: 11 },
+    // Keys: has data page 12 with 24 musical keys
+    TableLayout { table: TableType::Keys, header_page: 11, data_pages: &[12], empty_candidate: 50, last_page: 12 },
     TableLayout { table: TableType::Colors, header_page: 13, data_pages: &[14], empty_candidate: 42, last_page: 14 },
     TableLayout { table: TableType::PlaylistTree, header_page: 15, data_pages: &[16], empty_candidate: 46, last_page: 16 },
-    // PlaylistEntries: empty_candidate=51 in reference
-    TableLayout { table: TableType::PlaylistEntries, header_page: 17, data_pages: &[18], empty_candidate: 51, last_page: 18 },
+    // PlaylistEntries: empty_candidate=52 (shifted from 51 since Keys now uses 50)
+    TableLayout { table: TableType::PlaylistEntries, header_page: 17, data_pages: &[18], empty_candidate: 52, last_page: 18 },
     // Empty placeholder tables
     TableLayout { table: TableType::Unknown09, header_page: 19, data_pages: &[], empty_candidate: 20, last_page: 19 },
     TableLayout { table: TableType::Unknown0A, header_page: 21, data_pages: &[], empty_candidate: 22, last_page: 21 },
@@ -241,16 +242,16 @@ pub fn write_pdb(
     // - With overflow: 51 pages, next_unused=53, tracks_empty=52, page 50 = data
     let mut track_data_pages: Vec<u32> = vec![2];
 
-    // Add overflow pages starting from page 50
-    // IMPORTANT: Skip page 51 - it's reserved for PlaylistEntries.empty_candidate
-    // Reference pattern: 50, 52, 53, 54, ... (51 is never used for track data)
-    let mut next_alloc_page = 50u32;
+    // Add overflow pages starting from page 51 (Keys uses 50)
+    // IMPORTANT: Skip page 52 - it's reserved for PlaylistEntries.empty_candidate
+    // Pattern: 51, 53, 54, 55, ... (52 is never used for track data)
+    let mut next_alloc_page = 51u32;
     while track_data_pages.len() < track_chunks.len() {
         track_data_pages.push(next_alloc_page);
         next_alloc_page += 1;
-        // Skip page 51 (PlaylistEntries.empty_candidate)
-        if next_alloc_page == 51 {
-            next_alloc_page = 52;
+        // Skip page 52 (PlaylistEntries.empty_candidate)
+        if next_alloc_page == 52 {
+            next_alloc_page = 53;
         }
     }
 
@@ -260,17 +261,16 @@ pub fn write_pdb(
     // Note: actual_track_empty_candidate is used later for the table pointer
     let (file_page_count, actual_track_empty_candidate) = if needs_extra_pages {
         // With overflow: file extends to include overflow pages
-        // Reference shows 51 pages for 15-20 track exports
         let last_overflow = track_data_pages[track_chunks.len() - 1];
         let file_size = (last_overflow + 1).max(51);
-        // empty_candidate = max(52, last_overflow + 1)
-        // For 2 chunks [2, 50]: max(52, 51) = 52
-        // For 4 chunks [2, 50, 51, 52]: max(52, 53) = 53
-        let empty_cand = (last_overflow + 1).max(52);
+        // empty_candidate = max(53, last_overflow + 1)
+        // For 2 chunks [2, 51]: max(53, 52) = 53
+        // For 4 chunks [2, 51, 53, 54]: max(53, 55) = 55
+        let empty_cand = (last_overflow + 1).max(53);
         (file_size, empty_cand)
     } else {
         // No overflow: standard 41-page layout
-        (41u32, 50u32)  // empty_candidate stays at 50
+        (41u32, 51u32)  // empty_candidate = 51 (Keys uses 50)
     };
     file.set_len((file_page_count as u64) * PAGE_SIZE as u64)?;
     log::debug!("PDB file size: {} pages ({} bytes), track pages: {:?}",
@@ -640,8 +640,33 @@ pub fn write_pdb(
                     file.write_all(REFERENCE_HISTORY_PLAYLISTS_PAGE)?;
                 }
             }
+            TableType::Keys => {
+                // Keys table with all 24 musical keys
+                seek_to_page(&mut file, layout.header_page)?;
+                write_page_header(
+                    &mut file,
+                    layout.header_page,
+                    TableType::Keys as u32,
+                    layout.data_pages[0],
+                    0,
+                    0x1fff,
+                    0,
+                    0,
+                    0x64,
+                    1,
+                    0,
+                    0x1fff,
+                    0x03ec,
+                    0,
+                )?;
+                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), TableType::Keys)?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                // Write keys data page
+                seek_to_page(&mut file, layout.data_pages[0])?;
+                write_keys_table(&mut file, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
+            }
             TableType::Labels  // Empty table - no label data
-            | TableType::Keys  // Empty table - header only in reference
             | TableType::Artwork  // Empty table - no artwork data
             | TableType::Unknown09
             | TableType::Unknown0A
@@ -712,10 +737,10 @@ pub fn write_pdb(
     }
 
     // Patch header metadata
-    // next_unused = max(52, empty_candidate + 1)
-    // - No overflow: max(52, 50+1) = 52
-    // - With overflow: max(52, 52+1) = 53, max(52, 53+1) = 54
-    let next_unused_page = (actual_track_empty_candidate + 1).max(52);
+    // next_unused = max(53, empty_candidate + 1)
+    // - No overflow: max(53, 51+1) = 53
+    // - With overflow: max(53, 53+1) = 54, max(53, 55+1) = 56
+    let next_unused_page = (actual_track_empty_candidate + 1).max(53);
     let sequence = if tracks.len() <= 1 {
         14u32  // Match reference-1 exactly
     } else {
