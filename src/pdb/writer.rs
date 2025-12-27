@@ -26,6 +26,9 @@ pub struct TrackMetadata {
 
     /// Analysis results for this track
     pub analysis: AnalysisResult,
+
+    /// Artwork ID (0 = no artwork, 1+ = references Artwork table)
+    pub artwork_id: u32,
 }
 
 // PDB constants
@@ -254,10 +257,12 @@ pub fn write_pdb(
     path: &Path,
     tracks: &[TrackMetadata],
     playlists: &[Playlist],
+    artworks: &[ArtworkEntry],
 ) -> Result<()> {
     log::info!("Writing PDB file: {:?}", path);
     log::info!("  Tracks: {}", tracks.len());
     log::info!("  Playlists: {}", playlists.len());
+    log::info!("  Artworks: {}", artworks.len());
 
     let mut file = File::create(path)
         .with_context(|| format!("Failed to create PDB file: {:?}", path))?;
@@ -398,14 +403,48 @@ pub fn write_pdb(
         49u32  // Reference value
     };
 
-    // File size: must include all overflow pages
+    // Artwork table values
+    // When artworks exist: first=27 (header), last=28 (data), empty_candidate must be after all data pages
+    // When no artworks: first=27, last=27, empty_candidate=28
+    let has_artworks = !artworks.is_empty();
+    let artwork_data_page = if has_artworks { Some(28u32) } else { None };
+    let artwork_last_page = if has_artworks { 28u32 } else { 27u32 };
+    // Calculate artwork_empty_candidate dynamically to avoid conflicts with data pages
+    let artwork_empty_candidate = if has_artworks {
+        // Must be after all entity overflow pages
+        let max_used = *[
+            actual_track_empty_candidate,
+            actual_artist_empty_candidate,
+            actual_album_empty_candidate,
+        ].iter().max().unwrap();
+        // For small exports without overflow, use 53 (reference behavior)
+        // For large exports with overflow, use page after last empty_candidate
+        if needs_extra_pages {
+            max_used + 1
+        } else {
+            53u32
+        }
+    } else {
+        28u32
+    };
+
+    // File size: must include all overflow pages AND artwork empty_candidate if artworks exist
     let max_page = *[
         actual_track_last_page,
         actual_artist_last_page,
         actual_album_last_page,
     ].iter().max().unwrap();
     let file_page_count = if needs_extra_pages {
-        (max_page + 1).max(51)
+        // Include artwork_empty_candidate in page count for large exports with artworks
+        let base_count = (max_page + 1).max(51);
+        if has_artworks {
+            base_count.max(artwork_empty_candidate + 1)
+        } else {
+            base_count
+        }
+    } else if has_artworks {
+        // Small export with artworks: need page 53 to exist for artwork empty_candidate
+        54u32
     } else {
         41u32  // Standard layout
     };
@@ -414,6 +453,9 @@ pub fn write_pdb(
     log::debug!("  Track pages: {:?}", &track_data_pages);
     log::debug!("  Artist pages: {:?}", &artist_data_pages);
     log::debug!("  Album pages: {:?}", &album_data_pages);
+    if has_artworks {
+        log::debug!("  Artwork page: 28, empty_candidate: {}", artwork_empty_candidate);
+    }
 
     log::debug!("Tracks: {} total, {} chunks, pages: {:?}",
         tracks.len(), track_chunks.len(), &track_data_pages[..track_chunks.len()]);
@@ -895,8 +937,38 @@ pub fn write_pdb(
                 seek_to_page(&mut file, layout.data_pages[0])?;
                 write_keys_table(&mut file, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
+            TableType::Artwork => {
+                // Artwork table: header always at page 27, data at page 28 when artworks exist
+                seek_to_page(&mut file, layout.header_page)?;
+                let header_next_page = artwork_data_page.unwrap_or(artwork_empty_candidate);
+                write_page_header(
+                    &mut file,
+                    layout.header_page,
+                    TableType::Artwork as u32,
+                    header_next_page,
+                    0,
+                    0x1fff,
+                    0,
+                    0,
+                    0x64,
+                    1,
+                    0,
+                    0x1fff,
+                    0x03ec,
+                    0,
+                )?;
+                write_header_page_content(&mut file, layout.header_page, artwork_data_page, TableType::Artwork)?;
+                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
+
+                // Write artwork data page if artworks exist
+                if let Some(data_page) = artwork_data_page {
+                    seek_to_page(&mut file, data_page)?;
+                    // Use sequence base 8 for artwork (estimated from reference)
+                    let sequence = 8 + ((artworks.len().saturating_sub(1)) as u32) * 5;
+                    write_artwork_table(&mut file, artworks, data_page, artwork_empty_candidate, sequence)?;
+                }
+            }
             TableType::Labels  // Empty table - no label data
-            | TableType::Artwork  // Empty table - no artwork data
             | TableType::Unknown09
             | TableType::Unknown0A
             | TableType::Unknown0B
@@ -947,6 +1019,7 @@ pub fn write_pdb(
             TableType::Tracks => (actual_track_last_page, actual_track_empty_candidate),
             TableType::Artists => (actual_artist_last_page, actual_artist_empty_candidate),
             TableType::Albums => (actual_album_last_page, actual_album_empty_candidate),
+            TableType::Artwork => (artwork_last_page, artwork_empty_candidate),
             _ => (layout.last_page, layout.empty_candidate),
         };
         write_table_pointer(
@@ -964,6 +1037,7 @@ pub fn write_pdb(
         actual_track_empty_candidate,
         actual_artist_empty_candidate,
         actual_album_empty_candidate,
+        artwork_empty_candidate,
         52u32,  // PlaylistEntries.empty_candidate (static)
     ].iter().max().unwrap();
     let next_unused_page = (max_empty_candidate + 1).max(53);
@@ -1884,6 +1958,91 @@ fn write_albums_table_chunk(
     Ok(())
 }
 
+/// Artwork entry for PDB export
+#[derive(Debug, Clone)]
+pub struct ArtworkEntry {
+    /// Unique ID (1-indexed, matches artwork_id in track rows)
+    pub id: u32,
+    /// Path relative to USB root (e.g., "/PIONEER/Artwork/00001/a1.jpg")
+    pub path: String,
+}
+
+/// Write artwork table data page
+///
+/// Artwork row structure:
+///   0x00-0x03: artwork_id (u32)
+///   0x04+:     path as DeviceSQL string
+fn write_artwork_table(
+    file: &mut File,
+    artworks: &[ArtworkEntry],
+    page_index: u32,
+    next_page: u32,
+    sequence: u32,
+) -> Result<()> {
+    log::debug!("Writing artwork table: {} artworks to page {}", artworks.len(), page_index);
+
+    let num_rows_small = artworks.len().min(0xff) as u8;
+    let num_rows_large = if artworks.is_empty() { 0 } else { (artworks.len() - 1) as u16 };
+    let unknown3 = calculate_unk3(artworks.len());
+
+    let page_start = file.stream_position()?;
+    write_page_header(
+        file,
+        page_index,
+        TableType::Artwork as u32,
+        next_page,
+        num_rows_small,
+        num_rows_large,
+        unknown3,
+        0,  // unknown4
+        0x24,
+        sequence,
+        0,
+        0x0001,
+        0,
+        0,
+    )?;
+
+    // Build artwork rows
+    let mut heap = Vec::new();
+    let mut row_offsets = Vec::new();
+
+    for artwork in artworks {
+        let row_start = heap.len();
+
+        // artwork_id (u32)
+        heap.extend_from_slice(&artwork.id.to_le_bytes());
+
+        // Path as DeviceSQL string
+        let encoded_path = encode_device_sql(&artwork.path);
+        heap.extend_from_slice(&encoded_path);
+
+        // Pad row to 36 bytes to match reference
+        let row_size = heap.len() - row_start;
+        const ARTWORK_ROW_SIZE: usize = 36;
+        if row_size < ARTWORK_ROW_SIZE {
+            heap.extend(std::iter::repeat(0u8).take(ARTWORK_ROW_SIZE - row_size));
+        }
+
+        row_offsets.push(row_start as u16);
+    }
+
+    file.write_all(&heap)?;
+
+    let padding_needed = page_padding(heap.len(), artworks.len())?;
+    if padding_needed > 0 {
+        file.write_all(&vec![0u8; padding_needed])?;
+    }
+
+    write_row_groups(file, artworks.len(), &row_offsets, row_group_unknown_high_bit)?;
+
+    let free_size = padding_needed as u16;
+    let used_size = heap.len() as u16;
+    patch_page_usage(file, page_start, free_size, used_size)?;
+
+    Ok(())
+}
+
 /// Write tracks table
 ///
 /// Track row structure per Deep Symmetry documentation:
@@ -2009,7 +2168,7 @@ fn write_tracks_table(
         heap.extend_from_slice(&0x6a76u16.to_le_bytes());
 
         // 0x1C-0x1F: artwork_id
-        heap.extend_from_slice(&0u32.to_le_bytes());
+        heap.extend_from_slice(&track_meta.artwork_id.to_le_bytes());
 
         // 0x20-0x23: key_id
         // Use detected key from analysis, or track metadata, or 0 (no key)

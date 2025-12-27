@@ -2,15 +2,15 @@
 
 Export Rhythmbox music libraries to Pioneer USB format (compatible with XDJ-XZ and similar devices).
 
-## Status (2025-12-26)
+## Status (2025-12-27)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Multi-track exports | **Working** | 3+ tracks work on XDJ-XZ and Rekordbox 5 |
-| Single-track exports | **Broken** | Corrupted in Rekordbox 5 |
-| Large exports (88+) | **Working** | Dynamic page allocation |
+| Single-track exports | **Working** | Working on XDJ-XZ and Rekordbox 5 |
+| Large exports (100+) | **Working** | Dynamic page allocation |
 | BPM/Key detection | **Working** | ~87%/~72% accuracy |
-| Artwork | **Not Working** | See [ARTWORK.md](ARTWORK.md) |
+| Artwork | **Working** | Extracted from audio files, with deduplication |
 | Waveforms | **Not Working** | See [WAVEFORMS.md](WAVEFORMS.md) |
 
 ### Verified Hardware
@@ -78,14 +78,14 @@ src/
 
 - [CLAUDE.md](CLAUDE.md) - Implementation guide and debugging
 - [WAVEFORMS.md](WAVEFORMS.md) - Waveform generation
-- [ARTWORK.md](ARTWORK.md) - Artwork (not working)
+- [ARTWORK.md](ARTWORK.md) - Artwork extraction and display
 - [HISTORY.md](HISTORY.md) - Debug history and fixes
 
 ## Dependencies
 
 **Core:** quick-xml, rekordcrate, anyhow, clap, log
 
-**Audio:** symphonia (decoding), stratum-dsp (BPM/key), lofty (metadata), rayon (parallel)
+**Audio:** symphonia (decoding), stratum-dsp (BPM/key), lofty (metadata), image (artwork), rayon (parallel)
 
 ## References
 

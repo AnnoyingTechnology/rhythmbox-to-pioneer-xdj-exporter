@@ -5,6 +5,7 @@
 
 pub mod analysis;
 pub mod anlz;
+pub mod artwork;
 pub mod export;
 pub mod model;
 pub mod pdb;

@@ -8,7 +8,7 @@ mod types;
 mod writer;
 
 pub use types::{FileType, TableType};
-pub use writer::{write_pdb, write_pdb_ext, TrackMetadata};
+pub use writer::{write_pdb, write_pdb_ext, ArtworkEntry, TrackMetadata};
 
 // Phase 1: Minimal table implementations
 // Phase 2: Full table support with all metadata

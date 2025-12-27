@@ -2,19 +2,23 @@
 
 This document covers album artwork support for Pioneer USB exports.
 
-## Current Status (2025-12-26)
+## Current Status (2025-12-27)
 
-**Status:** Not Implemented (causes database corruption)
+**Status:** IMPLEMENTED AND WORKING
 
 ### What Works
 - Artwork extraction from audio files (lofty)
-- Image resizing (image crate)
+- Image resizing to 80x80 and 240x240 (image crate)
 - JPEG encoding for Pioneer format
+- PDB Artwork table integration
+- Track rows reference artwork_id correctly
+- Deduplication of identical artworks
+- Dynamic page allocation for large exports
 
-### What Doesn't Work
-- PDB Artwork table integration causes "corrupted database" errors in Rekordbox
-- Single-track exports with artwork are corrupted
-- Investigation ongoing
+### Tested Configurations
+- Small exports (35 tracks, 7 artworks): PASS
+- Large exports (119 tracks, 62 artworks): PASS
+- Mixed exports with track/artist/album overflow: PASS
 
 ---
 
@@ -24,7 +28,7 @@ This document covers album artwork support for Pioneer USB exports.
 ```
 PIONEER/Artwork/00001/
 ├── a1.jpg      (80x80 main artwork)
-├── a1_m.jpg    (56x56 thumbnail)
+├── a1_m.jpg    (240x240 large thumbnail)
 ├── a2.jpg
 ├── a2_m.jpg
 └── ...
@@ -32,49 +36,32 @@ PIONEER/Artwork/00001/
 
 ### Naming Convention
 - `a{id}.jpg` - Main artwork (80x80 pixels)
-- `a{id}_m.jpg` - Thumbnail (56x56 pixels)
+- `a{id}_m.jpg` - Large thumbnail (240x240 pixels)
 - Artwork IDs are 1-indexed and match PDB artwork_id field
 
 ---
 
 ## PDB Artwork Table Structure
 
-### Reference Analysis (reference-84 with artwork)
+### Table Location
+- Table type 13 (Artwork)
+- Header page: 27
+- Data page: 28 (when artworks exist)
+- empty_candidate: dynamically calculated
 
-**Table Location:**
-- File header table type 14: first=27, last=28, empty_candidate=53
-- Page 27: header page (page_type=13)
-- Page 28: data page with artwork rows (page_type=13)
+### With Artwork
+- first=27, last=28
+- empty_candidate = after all entity overflow pages
 
-**Without Artwork (reference-1):**
+### Without Artwork
 - first=27, last=27, empty_candidate=28
-- Page 28: ALL ZEROS
 
 ### Artwork Row Format
 ```
 4 bytes: artwork_id (u32)
 DeviceSQL string: path (e.g., "/PIONEER/Artwork/00001/a1.jpg")
+Padding to 36 bytes
 ```
-
-### Row Offsets (Page 28)
-Rows are stored at fixed intervals of ~36 bytes each.
-
----
-
-## Implementation Attempts (Failed)
-
-### Attempt 1: Static page allocation
-- Set artwork data page to 28
-- Set empty_candidate to 53
-- **Result:** Corrupted for small exports (page 53 doesn't exist)
-
-### Attempt 2: Dynamic page allocation
-- Allocate artwork data at page 53+
-- Leave page 28 as zeros
-- **Result:** Still corrupted
-
-### Root Cause (Suspected)
-The Artwork table (type 14 in file header) interacts with other tables in ways not fully understood. Simply adding data pages breaks validation.
 
 ---
 
@@ -84,23 +71,30 @@ Track rows have an `artwork_id` field at offset 0x1C-0x1F:
 - `0` = no artwork
 - `1+` = references artwork row in Artwork table
 
-Currently hardcoded to `0` (no artwork).
-
 ---
 
-## Future Implementation Plan
+## Dynamic Page Allocation
 
-1. **Understand reference structure completely**
-   - Binary diff reference-1 (no artwork) vs reference-84 (with artwork)
-   - Identify ALL fields that change when artwork is present
+For large exports, artwork_empty_candidate is calculated dynamically:
 
-2. **Minimal change approach**
-   - Only modify fields that differ in reference exports
-   - Don't add dynamic allocation unless proven necessary
+```rust
+let artwork_empty_candidate = if has_artworks {
+    let max_used = *[
+        actual_track_empty_candidate,
+        actual_artist_empty_candidate,
+        actual_album_empty_candidate,
+    ].iter().max().unwrap();
+    if needs_extra_pages {
+        max_used + 1  // After all entity overflow
+    } else {
+        53u32  // Reference behavior for small exports
+    }
+} else {
+    28u32
+};
+```
 
-3. **Test incrementally**
-   - Test on Rekordbox 5 first (stricter validation)
-   - Then test on XDJ-XZ hardware
+This prevents page conflicts when track/artist/album overflow uses pages 53+.
 
 ---
 
@@ -108,13 +102,15 @@ Currently hardcoded to `0` (no artwork).
 
 - `lofty` - Extract embedded artwork from audio files (ID3 APIC, Vorbis/FLAC pictures)
 - `image` - Resize and JPEG encode
+- `md5` - Hash for artwork deduplication
 
 ---
 
 ## Code Location
 
-- `src/artwork.rs` - Artwork extraction and resizing (exists but disabled)
-- `src/pdb/writer.rs` - Artwork table writing (needs work)
+- `src/artwork.rs` - ArtworkManager for extraction, processing, deduplication
+- `src/pdb/writer.rs` - Artwork table writing, track artwork_id integration
+- `src/export/pipeline.rs` - Artwork integration in export flow
 
 ---
 

@@ -3,6 +3,7 @@
 use super::config::ExportConfig;
 use super::organizer::UsbOrganizer;
 use crate::analysis::{AnalysisResult, AudioAnalyzer};
+use crate::artwork::ArtworkManager;
 use crate::model::Library;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -203,6 +204,38 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
 
         let pdb_path = self.organizer.pdb_path();
 
+        // Extract artwork from tracks
+        let mut artwork_manager = ArtworkManager::new();
+        let mut track_artwork_ids: HashMap<String, u32> = HashMap::new();
+
+        log::info!("Extracting artwork from tracks...");
+        for track in library.tracks() {
+            match ArtworkManager::extract_from_file(&track.file_path) {
+                Ok(Some(artwork_data)) => {
+                    match artwork_manager.add_artwork(&artwork_data) {
+                        Ok(artwork_id) => {
+                            log::debug!("Track {} has artwork ID {}", track.id, artwork_id);
+                            track_artwork_ids.insert(track.id.clone(), artwork_id);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to process artwork for {}: {}", track.title, e);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log::debug!("No artwork found for: {}", track.title);
+                }
+                Err(e) => {
+                    log::warn!("Failed to extract artwork from {}: {}", track.title, e);
+                }
+            }
+        }
+
+        log::info!("Found {} unique artwork(s)", artwork_manager.len());
+
+        // Write artwork files to USB
+        artwork_manager.write_artwork_files(&self.config.usb_path)?;
+
         // Build track metadata with file paths and ANLZ paths
         let mut track_metadata = Vec::new();
         for track in library.tracks() {
@@ -223,15 +256,29 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
                 .get(&track.id)
                 .context("Missing analysis result")?;
 
+            // Get artwork ID for this track (0 if none)
+            let artwork_id = track_artwork_ids.get(&track.id).copied().unwrap_or(0);
+
             track_metadata.push(crate::pdb::TrackMetadata {
                 track: track.clone(),
                 file_path: relative_music_path,
                 anlz_path: relative_anlz_path,
                 analysis: analysis.clone(),
+                artwork_id,
             });
         }
 
-        crate::pdb::write_pdb(&pdb_path, &track_metadata, library.playlists())?;
+        // Build artwork entries for PDB
+        let artworks: Vec<crate::pdb::ArtworkEntry> = artwork_manager
+            .get_artworks()
+            .iter()
+            .map(|a| crate::pdb::ArtworkEntry {
+                id: a.id,
+                path: a.path.clone(),
+            })
+            .collect();
+
+        crate::pdb::write_pdb(&pdb_path, &track_metadata, library.playlists(), &artworks)?;
 
         log::info!("PDB file written to: {:?}", pdb_path);
 

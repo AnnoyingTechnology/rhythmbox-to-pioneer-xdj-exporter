@@ -53,5 +53,8 @@ rayon = "1.10"
 # Tag reading/writing for metadata caching
 lofty = "0.22"
 
+# Image processing for artwork
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 [dev-dependencies]
 tempfile = "3.14"

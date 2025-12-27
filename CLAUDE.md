@@ -20,9 +20,9 @@
 - Tracks playable with metadata
 - Dynamic track paging
 - Table pointers now match reference exactly
+- Artwork extraction and display (see ARTWORK.md)
 
 ### What Doesn't Work
-- Artwork (see ARTWORK.md)
 - Waveforms display (see WAVEFORMS.md)
 - Track count display (uses static History data)
 
