@@ -4,6 +4,57 @@ This file contains resolved issues and historical debugging context. See CLAUDE.
 
 ---
 
+## Session 2025-12-27: Entity Overflow and Page Conflict Fix
+
+### Problem
+Large exports (100+ artists, 80+ albums) failed with "Page overflow" errors. After adding entity chunking, exports passed validation but were corrupted in Rekordbox.
+
+### Root Cause
+Page conflict between `Tracks.empty_candidate` and artist overflow pages:
+- Track data ended at page 72
+- `next_alloc_page` was 73 after track allocation
+- Artist overflow started at page 73
+- But `actual_track_empty_candidate` was ALSO 73!
+
+Both track empty_candidate pointer and artist data pointed to the same page.
+
+### Fix Applied (src/pdb/writer.rs)
+
+1. **Calculate track empty_candidate FIRST** before entity overflow allocation
+2. **Start entity overflow AFTER empty_candidate**, not at `next_alloc_page`
+
+```rust
+// Calculate track empty_candidate FIRST
+let actual_track_empty_candidate = if track_chunks.len() > 1 {
+    (actual_track_last_page + 1).max(53)
+} else {
+    51u32
+};
+
+// Artist overflow starts AFTER track empty_candidate
+let artist_start_page = if track_chunks.len() > 1 {
+    actual_track_empty_candidate + 1  // Skip track's empty_candidate
+} else {
+    next_alloc_page.max(53)
+};
+
+// Album overflow starts AFTER artist empty_candidate
+let album_start_page = if artist_chunks.len() > 1 {
+    actual_artist_empty_candidate + 1
+} else {
+    next_alloc_page.max(53)
+};
+```
+
+### Result
+- Track data: pages 2, 51, 53-69, empty_candidate=70
+- Artist overflow: pages 71-73, empty_candidate=74
+- Album data: page 8 (no overflow needed)
+- No page conflicts ✅
+- 149 tracks, 183 artists validated ✅
+
+---
+
 ## Session 2025-12-27: Keys Table and Page Reservation Fix
 
 ### Problem 1: Missing Keys

@@ -103,6 +103,78 @@ fn estimate_track_row_size(track_meta: &TrackMetadata) -> usize {
     aligned.max(344)
 }
 
+/// Estimate album row size (22 byte header + string + padding to 40)
+fn estimate_album_row_size(name: &str) -> usize {
+    let header_size = 22; // Fixed header + offset array
+    let string_size = if name.is_empty() { 1 } else {
+        if name.chars().all(|c| c.is_ascii()) {
+            name.len() + 2
+        } else {
+            name.encode_utf16().count() * 2 + 4
+        }
+    };
+    let raw = header_size + string_size;
+    raw.max(40) // Minimum 40 bytes per row
+}
+
+/// Estimate artist row size (16 byte header + string + padding to 28)
+fn estimate_artist_row_size(name: &str) -> usize {
+    let header_size = 16; // Fixed header + offset array
+    let string_size = if name.is_empty() { 1 } else {
+        if name.chars().all(|c| c.is_ascii()) {
+            name.len() + 2
+        } else {
+            name.encode_utf16().count() * 2 + 4
+        }
+    };
+    let raw = header_size + string_size;
+    raw.max(28) // Minimum 28 bytes per row
+}
+
+/// Calculate page capacity accounting for row group footer overhead
+fn page_capacity_for_rows(num_rows: usize) -> usize {
+    // Row group footer grows with number of rows
+    // Each group of 16 rows needs 36 bytes, partial groups need N*2+4 bytes
+    let full_groups = num_rows / 16;
+    let partial_rows = num_rows % 16;
+    let footer_bytes = full_groups * 36 + if partial_rows > 0 { partial_rows * 2 + 4 } else { 0 };
+
+    // Page size - header - footer
+    let capacity = PAGE_SIZE as usize - HEAP_START - footer_bytes;
+    capacity
+}
+
+/// Chunk entities into page-sized groups
+fn chunk_entities<'a>(entities: &'a [String], estimate_fn: fn(&str) -> usize) -> Vec<std::ops::Range<usize>> {
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0;
+    let mut chunk_size = 0usize;
+    let mut chunk_rows = 0usize;
+
+    for (idx, name) in entities.iter().enumerate() {
+        let row_size = estimate_fn(name);
+        let new_rows = chunk_rows + 1;
+
+        // Calculate capacity for the new row count (accounts for growing footer)
+        let capacity = page_capacity_for_rows(new_rows);
+
+        if chunk_size + row_size > capacity && idx > chunk_start {
+            chunks.push(chunk_start..idx);
+            chunk_start = idx;
+            chunk_size = 0;
+            chunk_rows = 0;
+        }
+        chunk_size += row_size;
+        chunk_rows += 1;
+    }
+
+    if chunk_start < entities.len() {
+        chunks.push(chunk_start..entities.len());
+    }
+
+    chunks
+}
+
 struct TableLayout {
     table: TableType,
     header_page: u32,
@@ -232,6 +304,16 @@ pub fn write_pdb(
         log::debug!("  Chunk {}: tracks {}..{} ({} tracks)", i, chunk.start, chunk.end, chunk.end - chunk.start);
     }
 
+    // Artist chunking - similar to tracks, use dynamic paging
+    let artist_names: Vec<String> = entities.artists.clone();
+    let artist_chunks = chunk_entities(&artist_names, estimate_artist_row_size);
+    log::debug!("Artist chunking: {} artists -> {} pages", artist_names.len(), artist_chunks.len());
+
+    // Album chunking - similar to tracks, use dynamic paging
+    let album_names: Vec<String> = entities.albums.clone();
+    let album_chunks = chunk_entities(&album_names, estimate_album_row_size);
+    log::debug!("Album chunking: {} albums -> {} pages", album_names.len(), album_chunks.len());
+
     // Track data pages allocation:
     // - First page is always page 2 (reference structure)
     // - Overflow pages start at page 50 (the Tracks empty_candidate position)
@@ -255,26 +337,83 @@ pub fn write_pdb(
         }
     }
 
-    let needs_extra_pages = track_chunks.len() > 1;
-
-    // File size and empty_candidate depend on overflow
-    // Note: actual_track_empty_candidate is used later for the table pointer
-    let (file_page_count, actual_track_empty_candidate) = if needs_extra_pages {
-        // With overflow: file extends to include overflow pages
-        let last_overflow = track_data_pages[track_chunks.len() - 1];
-        let file_size = (last_overflow + 1).max(51);
-        // empty_candidate = max(53, last_overflow + 1)
-        // For 2 chunks [2, 51]: max(53, 52) = 53
-        // For 4 chunks [2, 51, 53, 54]: max(53, 55) = 55
-        let empty_cand = (last_overflow + 1).max(53);
-        (file_size, empty_cand)
+    // Calculate track empty_candidate FIRST before allocating entity overflow
+    // This prevents entity overflow from conflicting with track empty_candidate
+    let actual_track_last_page = track_data_pages[track_data_pages.len() - 1];
+    let actual_track_empty_candidate = if track_chunks.len() > 1 {
+        (actual_track_last_page + 1).max(53)
     } else {
-        // No overflow: standard 41-page layout
-        (41u32, 51u32)  // empty_candidate = 51 (Keys uses 50)
+        51u32  // Keys uses 50
+    };
+
+    // Artist data pages allocation:
+    // - First page is always page 6 (reference structure)
+    // - Overflow pages must start AFTER track empty_candidate to avoid conflicts
+    let mut artist_data_pages: Vec<u32> = vec![6];
+    if artist_chunks.len() > 1 {
+        // Start after track empty_candidate, not after track data pages
+        let artist_start_page = if track_chunks.len() > 1 {
+            actual_track_empty_candidate + 1  // Skip track's empty_candidate page
+        } else {
+            next_alloc_page.max(53)
+        };
+        next_alloc_page = artist_start_page;
+        while artist_data_pages.len() < artist_chunks.len() {
+            artist_data_pages.push(next_alloc_page);
+            next_alloc_page += 1;
+        }
+    }
+
+    let actual_artist_last_page = artist_data_pages[artist_data_pages.len() - 1];
+    let actual_artist_empty_candidate = if artist_chunks.len() > 1 {
+        actual_artist_last_page + 1
+    } else {
+        47u32  // Reference value
+    };
+
+    // Album data pages allocation:
+    // - First page is always page 8 (reference structure)
+    // - Overflow pages must start AFTER artist empty_candidate to avoid conflicts
+    let mut album_data_pages: Vec<u32> = vec![8];
+    if album_chunks.len() > 1 {
+        // Start after artist empty_candidate
+        let album_start_page = if artist_chunks.len() > 1 {
+            actual_artist_empty_candidate + 1
+        } else {
+            next_alloc_page.max(53)
+        };
+        next_alloc_page = album_start_page;
+        while album_data_pages.len() < album_chunks.len() {
+            album_data_pages.push(next_alloc_page);
+            next_alloc_page += 1;
+        }
+    }
+
+    let needs_extra_pages = track_chunks.len() > 1 || artist_chunks.len() > 1 || album_chunks.len() > 1;
+
+    let actual_album_last_page = album_data_pages[album_data_pages.len() - 1];
+    let actual_album_empty_candidate = if album_chunks.len() > 1 {
+        actual_album_last_page + 1
+    } else {
+        49u32  // Reference value
+    };
+
+    // File size: must include all overflow pages
+    let max_page = *[
+        actual_track_last_page,
+        actual_artist_last_page,
+        actual_album_last_page,
+    ].iter().max().unwrap();
+    let file_page_count = if needs_extra_pages {
+        (max_page + 1).max(51)
+    } else {
+        41u32  // Standard layout
     };
     file.set_len((file_page_count as u64) * PAGE_SIZE as u64)?;
-    log::debug!("PDB file size: {} pages ({} bytes), track pages: {:?}",
-        file_page_count, file_page_count * PAGE_SIZE, &track_data_pages);
+    log::debug!("PDB file size: {} pages ({} bytes)", file_page_count, file_page_count * PAGE_SIZE);
+    log::debug!("  Track pages: {:?}", &track_data_pages);
+    log::debug!("  Artist pages: {:?}", &artist_data_pages);
+    log::debug!("  Album pages: {:?}", &album_data_pages);
 
     log::debug!("Tracks: {} total, {} chunks, pages: {:?}",
         tracks.len(), track_chunks.len(), &track_data_pages[..track_chunks.len()]);
@@ -395,12 +534,13 @@ pub fn write_pdb(
                 write_genres_table(&mut file, &entities.genres, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
             TableType::Artists => {
+                // Header page - point to first artist data page
                 seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
                     layout.header_page,
                     TableType::Artists as u32,
-                    layout.data_pages[0],
+                    artist_data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -412,19 +552,64 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
+                write_header_page_content(&mut file, layout.header_page, Some(artist_data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
-                seek_to_page(&mut file, layout.data_pages[0])?;
-                write_artists_table(&mut file, &entities.artists, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
+                // Write each artist data page
+                let mut current_artist_id = 1u32;
+                let mut cumulative_sequence = 7u32; // Base sequence for artists
+                for (chunk_idx, artist_range) in artist_chunks.iter().enumerate() {
+                    if artist_range.is_empty() {
+                        continue;
+                    }
+
+                    let artist_chunk = &entities.artists[artist_range.clone()];
+                    let page_num = artist_data_pages[chunk_idx];
+                    let next_page = if chunk_idx + 1 < artist_chunks.len() {
+                        artist_data_pages[chunk_idx + 1]
+                    } else {
+                        actual_artist_empty_candidate
+                    };
+
+                    // Sequence calculation
+                    let artists_on_page = artist_chunk.len();
+                    let is_last_page = chunk_idx + 1 >= artist_chunks.len();
+                    let sequence = if chunk_idx == 0 {
+                        let base_seq = cumulative_sequence + (artists_on_page.saturating_sub(1) as u32) * 5;
+                        if artists_on_page >= 11 && is_last_page { base_seq + 1 } else { base_seq }
+                    } else {
+                        let base_seq = cumulative_sequence + (artists_on_page as u32) * 5;
+                        if artists_on_page >= 11 && is_last_page { base_seq + 1 } else { base_seq }
+                    };
+                    cumulative_sequence = sequence;
+                    let unknown4 = if artists_on_page >= 10 {
+                        ((artists_on_page + 15) / 16) as u8
+                    } else {
+                        0x00u8
+                    };
+
+                    seek_to_page(&mut file, page_num)?;
+                    write_artists_table_chunk(
+                        &mut file,
+                        artist_chunk,
+                        page_num,
+                        next_page,
+                        sequence,
+                        unknown4,
+                        current_artist_id,
+                    )?;
+
+                    current_artist_id += artist_chunk.len() as u32;
+                }
             }
             TableType::Albums => {
+                // Header page - point to first album data page
                 seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
                     &mut file,
                     layout.header_page,
                     TableType::Albums as u32,
-                    layout.data_pages[0],
+                    album_data_pages[0],
                     0,
                     0x1fff,
                     0,
@@ -436,11 +621,55 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
+                write_header_page_content(&mut file, layout.header_page, Some(album_data_pages[0]), layout.table)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
-                seek_to_page(&mut file, layout.data_pages[0])?;
-                write_albums_table(&mut file, &entities, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
+                // Write each album data page
+                let mut current_album_id = 1u32;
+                let mut cumulative_sequence = 9u32; // Base sequence for albums
+                for (chunk_idx, album_range) in album_chunks.iter().enumerate() {
+                    if album_range.is_empty() {
+                        continue;
+                    }
+
+                    let album_chunk = &entities.albums[album_range.clone()];
+                    let page_num = album_data_pages[chunk_idx];
+                    let next_page = if chunk_idx + 1 < album_chunks.len() {
+                        album_data_pages[chunk_idx + 1]
+                    } else {
+                        actual_album_empty_candidate
+                    };
+
+                    // Sequence calculation
+                    let albums_on_page = album_chunk.len();
+                    let is_last_page = chunk_idx + 1 >= album_chunks.len();
+                    let sequence = if chunk_idx == 0 {
+                        let base_seq = cumulative_sequence + (albums_on_page.saturating_sub(1) as u32) * 5;
+                        if albums_on_page >= 11 && is_last_page { base_seq + 1 } else { base_seq }
+                    } else {
+                        let base_seq = cumulative_sequence + (albums_on_page as u32) * 5;
+                        if albums_on_page >= 11 && is_last_page { base_seq + 1 } else { base_seq }
+                    };
+                    cumulative_sequence = sequence;
+                    let unknown4 = if albums_on_page >= 10 {
+                        ((albums_on_page + 15) / 16) as u8
+                    } else {
+                        0x00u8
+                    };
+
+                    seek_to_page(&mut file, page_num)?;
+                    write_albums_table_chunk(
+                        &mut file,
+                        album_chunk,
+                        page_num,
+                        next_page,
+                        sequence,
+                        unknown4,
+                        current_album_id,
+                    )?;
+
+                    current_album_id += album_chunk.len() as u32;
+                }
             }
             // Labels and Keys are empty tables (no data) - handled in the empty tables branch below
             TableType::Colors => {
@@ -707,25 +936,18 @@ pub fn write_pdb(
 
     // Note: Pages 41-49 are left as ALL ZEROS in reference exports.
     // We do NOT write placeholder headers for them - they're just zero-filled.
-    // Only track data overflow pages (50+) get actual content written to them.
+    // Only data overflow pages (50+) get actual content written to them.
     log::debug!("Pages 41-49 left as zeros (reference behavior)");
-
-    // Write table pointers back into the header
-    // For tracks, use the actual last data page (based on how many chunks we wrote)
-    let actual_track_last_page = if track_chunks.is_empty() {
-        TABLE_LAYOUTS[0].header_page
-    } else {
-        track_data_pages[track_chunks.len() - 1]
-    };
 
     // Write table pointers at 0x1c
     // Each table pointer is 16 bytes: table_type, empty_candidate, first_page, last_page
     file.seek(SeekFrom::Start(0x1c))?;
     for layout in TABLE_LAYOUTS {
-        let (last_page, empty_candidate) = if layout.table == TableType::Tracks {
-            (actual_track_last_page, actual_track_empty_candidate)
-        } else {
-            (layout.last_page, layout.empty_candidate)
+        let (last_page, empty_candidate) = match layout.table {
+            TableType::Tracks => (actual_track_last_page, actual_track_empty_candidate),
+            TableType::Artists => (actual_artist_last_page, actual_artist_empty_candidate),
+            TableType::Albums => (actual_album_last_page, actual_album_empty_candidate),
+            _ => (layout.last_page, layout.empty_candidate),
         };
         write_table_pointer(
             &mut file,
@@ -737,10 +959,14 @@ pub fn write_pdb(
     }
 
     // Patch header metadata
-    // next_unused = max(53, empty_candidate + 1)
-    // - No overflow: max(53, 51+1) = 53
-    // - With overflow: max(53, 53+1) = 54, max(53, 55+1) = 56
-    let next_unused_page = (actual_track_empty_candidate + 1).max(53);
+    // next_unused = max of all empty_candidate values + 1
+    let max_empty_candidate = *[
+        actual_track_empty_candidate,
+        actual_artist_empty_candidate,
+        actual_album_empty_candidate,
+        52u32,  // PlaylistEntries.empty_candidate (static)
+    ].iter().max().unwrap();
+    let next_unused_page = (max_empty_candidate + 1).max(53);
     let sequence = if tracks.len() <= 1 {
         14u32  // Match reference-1 exactly
     } else {
@@ -1492,6 +1718,165 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
     write_row_groups(file, albums.len(), &row_offsets, row_group_unknown_high_bit)?;
 
     // Patch usage sizes for this page
+    let free_size = padding_needed as u16;
+    let used_size = heap.len() as u16;
+    patch_page_usage(file, page_start, free_size, used_size)?;
+
+    Ok(())
+}
+
+/// Write a chunk of artists to a single page (for multi-page artist tables)
+fn write_artists_table_chunk(
+    file: &mut File,
+    artists: &[String],
+    page_index: u32,
+    next_page: u32,
+    sequence: u32,
+    unknown4: u8,
+    start_id: u32,
+) -> Result<()> {
+    log::debug!("Writing artist chunk: {} artists, page {}, start_id {}", artists.len(), page_index, start_id);
+
+    let num_rows_small = artists.len().min(0xff) as u8;
+    let num_rows_large = if artists.is_empty() { 0 } else { (artists.len() - 1) as u16 };
+    let unknown3 = calculate_unk3(artists.len());
+
+    let page_start = file.stream_position()?;
+    write_page_header(
+        file,
+        page_index,
+        TableType::Artists as u32,
+        next_page,
+        num_rows_small,
+        num_rows_large,
+        unknown3,
+        unknown4,
+        0x24,
+        sequence,
+        0,
+        0x0001,
+        0,
+        0,
+    )?;
+
+    let mut heap = Vec::new();
+    let mut row_offsets = Vec::new();
+
+    for (idx, artist) in artists.iter().enumerate() {
+        let row_start = heap.len();
+        let artist_id = start_id + idx as u32;
+
+        heap.extend_from_slice(&0x60u16.to_le_bytes());
+        let idx_shift = (idx as u16) * 0x20;
+        heap.extend_from_slice(&idx_shift.to_le_bytes());
+        heap.extend_from_slice(&artist_id.to_le_bytes());
+
+        heap.push(0x03u8);
+        let name_offset = 10u8;
+        heap.push(name_offset);
+
+        let encoded_name = encode_device_sql(artist);
+        heap.extend_from_slice(&encoded_name);
+
+        let row_size = heap.len() - row_start;
+        const ARTIST_ROW_SIZE: usize = 28;
+        if row_size < ARTIST_ROW_SIZE {
+            heap.extend(std::iter::repeat(0u8).take(ARTIST_ROW_SIZE - row_size));
+        }
+
+        row_offsets.push(row_start as u16);
+    }
+
+    file.write_all(&heap)?;
+
+    let padding_needed = page_padding(heap.len(), artists.len())?;
+    if padding_needed > 0 {
+        file.write_all(&vec![0u8; padding_needed])?;
+    }
+
+    write_row_groups(file, artists.len(), &row_offsets, row_group_unknown_high_bit)?;
+
+    let free_size = padding_needed as u16;
+    let used_size = heap.len() as u16;
+    patch_page_usage(file, page_start, free_size, used_size)?;
+
+    Ok(())
+}
+
+/// Write a chunk of albums to a single page (for multi-page album tables)
+fn write_albums_table_chunk(
+    file: &mut File,
+    albums: &[String],
+    page_index: u32,
+    next_page: u32,
+    sequence: u32,
+    unknown4: u8,
+    start_id: u32,
+) -> Result<()> {
+    log::debug!("Writing album chunk: {} albums, page {}, start_id {}", albums.len(), page_index, start_id);
+
+    let num_rows_small = albums.len().min(0xff) as u8;
+    let num_rows_large = if albums.is_empty() { 0 } else { (albums.len() - 1) as u16 };
+    let unknown3 = calculate_unk3(albums.len());
+
+    let page_start = file.stream_position()?;
+    write_page_header(
+        file,
+        page_index,
+        TableType::Albums as u32,
+        next_page,
+        num_rows_small,
+        num_rows_large,
+        unknown3,
+        unknown4,
+        0x24,
+        sequence,
+        0,
+        0x0001,
+        0,
+        0,
+    )?;
+
+    let mut heap = Vec::new();
+    let mut row_offsets = Vec::new();
+
+    for (idx, album) in albums.iter().enumerate() {
+        let row_start = heap.len();
+        let album_id = start_id + idx as u32;
+
+        heap.extend_from_slice(&0x80u16.to_le_bytes());
+        let idx_shift = (idx as u16) * 0x20;
+        heap.extend_from_slice(&idx_shift.to_le_bytes());
+        heap.extend_from_slice(&0u32.to_le_bytes()); // unknown2
+        heap.extend_from_slice(&0u32.to_le_bytes()); // artist_id (always 0)
+        heap.extend_from_slice(&album_id.to_le_bytes());
+        heap.extend_from_slice(&0u32.to_le_bytes()); // unknown3
+
+        heap.push(0x03u8);
+        let name_offset = 22u8;
+        heap.push(name_offset);
+
+        let encoded_name = encode_device_sql(album);
+        heap.extend_from_slice(&encoded_name);
+
+        let row_size = heap.len() - row_start;
+        const ALBUM_ROW_SIZE: usize = 40;
+        if row_size < ALBUM_ROW_SIZE {
+            heap.extend(std::iter::repeat(0u8).take(ALBUM_ROW_SIZE - row_size));
+        }
+
+        row_offsets.push(row_start as u16);
+    }
+
+    file.write_all(&heap)?;
+
+    let padding_needed = page_padding(heap.len(), albums.len())?;
+    if padding_needed > 0 {
+        file.write_all(&vec![0u8; padding_needed])?;
+    }
+
+    write_row_groups(file, albums.len(), &row_offsets, row_group_unknown_high_bit)?;
+
     let free_size = padding_needed as u16;
     let used_size = heap.len() as u16;
     patch_page_usage(file, page_start, free_size, used_size)?;
