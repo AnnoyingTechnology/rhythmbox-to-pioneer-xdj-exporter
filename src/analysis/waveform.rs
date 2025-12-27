@@ -102,10 +102,9 @@ fn generate_pwav(samples: &[f32], _sample_rate: u32, overall_peak: f32) -> Vec<u
         // Calculate RMS and peak for this window
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 1-31
-        // Rekordbox uses minimum height of 1 (never 0) for PWAV
+        // Normalize peak relative to track's overall peak, then scale to 0-31
         let normalized_peak = peak / overall_peak;
-        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
+        let height = (normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8;
 
         if peak > max_peak {
             max_peak = peak;
@@ -149,10 +148,9 @@ fn generate_pwv2(samples: &[f32], _sample_rate: u32, overall_peak: f32) -> Vec<u
 
         let (_, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 1-15
-        // Rekordbox uses minimum height of 1 (never 0) for PWV2
+        // Normalize peak relative to track's overall peak, then scale to 0-15
         let normalized_peak = peak / overall_peak;
-        let height = ((normalized_peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8).max(1);
+        let height = (normalized_peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8;
         result.push(height);
     }
 
@@ -181,10 +179,10 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32, overall_peak: f32) -> Vec<u8
 
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 1-31
-        // Rekordbox uses minimum height of 1 (never 0) for PWV3
+        // Normalize peak relative to track's overall peak, then scale to 0-31
+        // Reference shows height 0 is valid in PWV3 data
         let normalized_peak = peak / overall_peak;
-        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
+        let height = (normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8;
 
         // Whiteness=7 for PWV3 (unlike PWAV which uses 5)
         // Reference files consistently use whiteness=7 for detail waveforms
@@ -301,10 +299,9 @@ fn generate_pwv5(samples: &[f32], sample_rate: u32, overall_peak: f32) -> Vec<u8
 
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 12-31
-        // Rekordbox uses a minimum height floor of 12 for PWV5 waveforms
+        // Normalize peak relative to track's overall peak, then scale to 0-31
         let normalized_peak = peak / overall_peak;
-        let height = 12 + ((normalized_peak * 19.0).min(19.0) as u8);
+        let height = (normalized_peak * MAX_HEIGHT_PWV5 as f32).min(MAX_HEIGHT_PWV5 as f32) as u8;
 
         // Color variation based on RMS/peak ratio (crest factor)
         // Reference files have varied colors - uniform white may be rejected as invalid

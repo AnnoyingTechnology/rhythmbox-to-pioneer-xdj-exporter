@@ -23,7 +23,10 @@
 - Artwork extraction and display (see ARTWORK.md)
 
 ### What Doesn't Work
-- Waveforms display (see WAVEFORMS.md)
+- **Waveforms display FLATLINE** (see WAVEFORMS.md)
+  - ANLZ files are structurally correct
+  - Even with reference ANLZ data injected, shows flatline
+  - Issue is in PDB - some unknown field affects waveform display
 - Track count display (uses static History data)
 
 ---

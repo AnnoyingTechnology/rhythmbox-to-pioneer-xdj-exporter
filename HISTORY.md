@@ -4,6 +4,59 @@ This file contains resolved issues and historical debugging context. See CLAUDE.
 
 ---
 
+## Session 2025-12-27: Waveform FLATLINE Investigation (UNSOLVED)
+
+### Problem
+Waveforms display as FLATLINE on XDJ-XZ hardware despite ANLZ files being structurally correct.
+
+### XDJ-XZ Hardware Test Results
+
+| Test Variant | Needle | Jogwheel | Main | Notes |
+|--------------|--------|----------|------|-------|
+| Our PDB + Reference ANLZ | FLATLINE | FLATLINE | Nothing | PWV3 shows, but flatline |
+| Reference PDB + Reference ANLZ | WORKS | WORKS | WORKS | Dynamic waveform |
+
+### Key Discovery
+**PWV3 controls needle search + jogwheel on XDJ-XZ** (not PWV4/PWV5 as initially thought).
+
+When we inject **byte-for-byte identical** PWV3 data from reference into our export, the XDJ still shows FLATLINE. This proves the issue is in the **PDB file**, not the ANLZ files.
+
+### Verified Identical Fields (Track Row)
+
+| Offset | Field | Ours | Reference |
+|--------|-------|------|-----------|
+| 0x08 | sample_rate | 44100 | 44100 |
+| 0x52 | sample_depth | 16 | 16 |
+| 0x54 | duration_secs | 1 | 1 |
+| String offsets | All 21 | IDENTICAL | IDENTICAL |
+| analyze_path | Path | Valid ANLZ location | Valid ANLZ location |
+
+### Known Differences (May Affect Waveforms)
+
+| Offset | Field | Ours | Reference | Notes |
+|--------|-------|------|-----------|-------|
+| 0x10 | file_size | 30491 | 34857 | Different audio files |
+| 0x14 | u2 | 21 | 44 | track_id + 20 |
+| 0x20 | key_id | 0 | 1 | We don't detect key |
+| 0x30 | bitrate | 320 | 192 | Hardcoded value |
+
+### PWV3 Data Verification (xxd at offset 0x82)
+```
+Reference: 5057 5633 0000 0018 0000 00d1 0000 0001
+           0000 00b9 0096 0000 e0e0 e0a0 80a0 c060
+Injected:  5057 5633 0000 0018 0000 00d1 0000 0001
+           0000 00b9 0096 0000 e0e0 e0a0 80a0 c060
+           (BYTE-FOR-BYTE IDENTICAL)
+```
+
+### Root Cause Hypothesis
+Some unknown PDB field signals to the XDJ that "waveform is not analyzed" or affects waveform interpretation. The issue is NOT in the ANLZ files or waveform data itself.
+
+### Status
+**UNSOLVED** - Awaiting expert consultation. See `help/ask.md` for full context.
+
+---
+
 ## Session 2025-12-27: Entity Overflow and Page Conflict Fix
 
 ### Problem

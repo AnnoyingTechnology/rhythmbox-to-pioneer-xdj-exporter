@@ -4,53 +4,80 @@ This document covers waveform generation for Pioneer USB exports.
 
 ## Current Status (2025-12-27)
 
-**Status:** TESTING NEEDED on XDJ-XZ (All height floor fixes applied)
+**Status:** UNSOLVED - Waveforms display as FLATLINE on XDJ-XZ
 
-### Recent Progress (2025-12-27)
-All waveform height floors now match Rekordbox behavior:
-- PWV5: 12-31 (not 0-31)
-- PWAV/PWV3: 1-31 (not 0-31)
-- PWV2: 1-15 (not 0-15)
+The ANLZ files are structurally correct and byte-for-byte identical to reference when injected.
+The problem is in the **PDB file** - some field tells the XDJ to display flatline.
 
-### What Works
-- Monochrome preview display in Rekordbox 5
-- Main screen waveform displays when swapping EXT in reference export
+---
 
-### Recent Fixes (2025-12-27)
+## XDJ-XZ Hardware Test Results
 
-#### 1. Height Normalization Fix
-**Root cause:** Heights were using raw peak values (0.0-1.0) instead of normalizing to the track's maximum peak.
-- Before: Heights 1-11 (compressed, flat appearance)
-- After: Heights 0-31 (full dynamic range)
+| Test Variant | Needle Search | Jogwheel | Main Screen | Notes |
+|--------------|---------------|----------|-------------|-------|
+| pwv5 only | Nothing | Nothing | Nothing | PWV5 alone insufficient |
+| pwv4 only | Nothing | Nothing | Nothing | PWV4 alone insufficient |
+| pwv3 only | **WORKS** | **WORKS** | Nothing | Shows FLATLINE |
+| all-ext | Nothing | Nothing | Nothing | Multiple replacements broke it |
+| all-waveforms | **WORKS** | **WORKS** | Nothing | Shows FLATLINE |
+| ref-anlz | **WORKS** | **WORKS** | Nothing | Shows FLATLINE |
+| Complete ref export | **WORKS** | **WORKS** | **WORKS** | Proper dynamic waveform |
 
-**Solution:** All waveform generators now receive `overall_peak` parameter and normalize heights relative to it, ensuring the loudest part of the track reaches max height.
+**Key Findings:**
+1. **PWV3 controls needle search + jogwheel** on XDJ-XZ (not PWV4 or PWV5)
+2. **PWV5 controls main screen waveform** - doesn't work in any hybrid export
+3. **FLATLINE issue**: Even with reference PWV3 data, XDJ shows flatline instead of proper waveform
+4. Complete reference export works fully - issue is in our **PDB file**, not ANLZ files
 
-#### 2. PWV4 Color Encoding Fix
-Fixed PWV4 (color preview) encoding for needle search waveform:
-- Height range: Changed from 0-31 (5-bit) to 0-127 (full 8-bit)
-- Color encoding: Low freq now uses HIGH color values (0xE0-0xFF), Mid/High use LOW values (0x01-0x30)
+---
 
-#### 3. PWV5 Encoding Fix
-Fixed PWV5 byte order - height was in wrong byte position:
-- Byte 0: `(blue_low3 << 5) | (height & 0x1f)` - height in LOW 5 bits
-- Byte 1: `(red_3bits << 5) | (green_3bits << 2) | blue_high2`
+## Investigation Summary
 
-#### 4. PWV5 Height Floor Fix
-Rekordbox uses a minimum height floor of 12 for PWV5:
-- Before: Heights 0-31 (our output had values below 12)
-- After: Heights 12-31 (matching Rekordbox behavior)
-- Formula: `height = 12 + (normalized_peak * 19)`
+### What Has Been Verified
 
-#### 5. PWAV/PWV2/PWV3 Height Floor Fix
-Rekordbox never uses height 0 in any waveform type:
-- PWAV: Changed from 0-31 to 1-31
-- PWV2: Changed from 0-15 to 1-15
-- PWV3: Changed from 0-31 to 1-31
-- Formula: `.max(1)` applied to all height calculations
+1. **ANLZ File Structure** - IDENTICAL to reference
+   - Same section order, sizes, headers
+   - PWV3 at offset 0x82 with correct entry count
+   - Section headers match byte-for-byte
 
-### Known Limitations
-- PWV5 colors use crest-factor based coloring (may differ from Rekordbox)
-- Heights normalized to our audio analysis (slight differences from Rekordbox)
+2. **Waveform Data** - IDENTICAL when injected
+   ```
+   Reference PWV3 @ 0x9a: e0e0 e0a0 80a0 c060 a0e0 e0e1 e1e2...
+   Injected PWV3 @ 0x9a: e0e0 e0a0 80a0 c060 a0e0 e0e1 e1e2... (SAME)
+   ```
+
+3. **Track Row Waveform Fields** - IDENTICAL
+   | Offset | Field | Ours | Reference |
+   |--------|-------|------|-----------|
+   | 0x08 | sample_rate | 44100 | 44100 |
+   | 0x52 | sample_depth | 16 | 16 |
+   | 0x54 | duration_secs | 1 | 1 |
+
+4. **String Offsets** - All 21 offsets IDENTICAL
+
+5. **analyze_path** - Both point to valid ANLZ locations
+   ```
+   Ours: /PIONEER/USBANLZ/P9CC/00C30E0D/ANLZ0000.DAT
+   Ref:  /PIONEER/USBANLZ/P05C/0001D2C0/ANLZ0000.DAT
+   ```
+
+### Known Differences (May or May Not Affect Waveforms)
+
+| Offset | Field | Ours | Reference | Notes |
+|--------|-------|------|-----------|-------|
+| 0x10 | file_size | 30491 | 34857 | Different audio files |
+| 0x14 | u2 | 21 | 44 | track_id + 20 |
+| 0x20 | key_id | 0 | 1 | We don't detect key |
+| 0x30 | bitrate | 320 | 192 | Hardcoded value |
+
+### Root Cause Hypothesis
+
+The flatline with reference ANLZ data means our PDB is causing the XDJ to misinterpret the waveform.
+
+Possible causes:
+- Some unknown field indicates "waveform not analyzed"
+- A field affecting waveform interpretation we haven't identified
+- Something in the track row structure beyond the fields we've compared
 
 ---
 
@@ -83,6 +110,7 @@ height (4 bits) - simple peak amplitude
 ```
 height (5 low bits) | whiteness (3 high bits)
 whiteness = 7 (like reference)
+Entry count = duration_secs * 150
 ```
 
 ### PWV4 (Color Preview - 3 Frequency Bands)
@@ -96,69 +124,6 @@ Height uses FULL 8-bit range (0-127 typical), NOT 5-bit like PWAV/PWV3.
 ### PWV5 (Color Detail)
 ```
 RGB (3 bits each) | height (5 bits)
-```
-
----
-
-## Implementation Details
-
-### Audio Processing
-- Uses `symphonia` to decode audio to mono samples
-- Calculates RMS and peak per time window
-- Height from peak amplitude (0-31 range for 5-bit fields)
-
-### Key Files
-- `src/analysis/waveform.rs` - Waveform generation
-- `src/anlz/writer.rs` - ANLZ file writing (contains waveform sections)
-
----
-
-## Historical Issues (Resolved)
-
-### PWV4 Generation Bug (Fixed 2025-12-25)
-**Root cause:** `generate_pwv4()` function existed but was never called. The code returned an empty Vec.
-
-```rust
-// OLD CODE - BROKEN:
-let color_preview = Vec::new(); // Returns empty
-
-// NEW CODE - FIXED:
-let color_preview = generate_pwv4(&samples, sample_rate);
-```
-
-### StubAnalyzer Bug (Fixed)
-When using `--no-bpm --no-key`, the StubAnalyzer was returning `WaveformData::minimal_stub()` (empty vectors) instead of calling `generate_waveforms()`.
-
-### Whiteness/Height Fix
-- PWAV now uses whiteness=5 (was 7)
-- PWV3 now uses whiteness=7 (was 5)
-
-### PWV4 Format Fix (Fixed 2025-12-27)
-**Root cause:** PWV4 was using wrong encoding - heights capped at 31 and all colors set to 0xF0+.
-Reference analysis showed:
-- Heights should be 0-127 (full 8-bit), not 0-31
-- Low frequency color should be HIGH (0xE0-0xFF = bright)
-- Mid/High frequency colors should be LOW (0x01-0x30 = dim)
-
-### Height Normalization Fix (Fixed 2025-12-27)
-**Root cause:** All waveform generators were using raw peak amplitude values (0.0-1.0) directly instead of normalizing to the track's maximum peak.
-
-For the Fresh.mp3 test track:
-- Decoded peak amplitude: 0.3725
-- Before fix: heights 1-11 (0.3725 * 31 = 11)
-- After fix: heights 0-31 (normalized so 0.3725 maps to 31)
-
-**Analysis comparing reference vs ours:**
-```
-Reference PWV3 heights: 0-31 range (loudest parts hit 31)
-Our PWV3 heights before: 1-11 range (compressed, flat)
-Our PWV3 heights after: 0-31 range (full dynamic range)
-```
-
-**Fix:** All waveform generators now receive `overall_peak` parameter and calculate:
-```rust
-let normalized_peak = peak / overall_peak;
-let height = (normalized_peak * MAX_HEIGHT as f32) as u8;
 ```
 
 ---
@@ -177,29 +142,37 @@ let height = (normalized_peak * MAX_HEIGHT as f32) as u8;
 1. PMAI (header)
 2. PPTH (path)
 3. PWV3 (detail waveform)
-4. PWV4 (color preview)
-5. PWV5 (color detail)
+4. PCOB x2 (cue bank)
+5. PCO2 x2 (cue list)
+6. PWV5 (color detail)
+7. PWV4 (color preview)
 
 ---
 
-## Test Results (2025-12-25)
+## Next Steps for Expert Consultation
 
-| Test | Result | Conclusion |
-|------|--------|------------|
-| Remove `exportExt.pdb` | Works | exportExt.pdb NOT required |
-| Remove `ANLZ0000.EXT` | Broken | EXT file is CRITICAL |
-| Remove `ANLZ0000.DAT` | Works | DAT is secondary/optional |
-| Swap DAT with ours | Works | Our DAT is valid or not relevant |
-| Swap EXT with ours | Partial | Main screen waveform works, needle search waveform missing |
+See `help/ask.md` for comprehensive context to share with experts.
+
+Key questions:
+1. What PDB field could cause FLATLINE despite valid ANLZ data?
+2. Is there an "analyzed" flag in the track row?
+3. Do any unknown fields affect waveform display?
 
 ---
 
-## Future Improvements
+## Historical Issues (Resolved)
 
-- [ ] PWV5 frequency-based coloring (lows=red, highs=blue)
-- [ ] Height scaling to match Rekordbox ranges
-- [ ] PWV6/PWV7 3-band waveforms (CDJ-3000)
-- [ ] Log scaling for visual style
+### PWV4 Generation Bug (Fixed 2025-12-25)
+**Root cause:** `generate_pwv4()` function existed but was never called. The code returned an empty Vec.
+
+### StubAnalyzer Bug (Fixed)
+When using `--no-bpm --no-key`, the StubAnalyzer was returning `WaveformData::minimal_stub()` (empty vectors) instead of calling `generate_waveforms()`.
+
+### Height Normalization Fix (Fixed 2025-12-27)
+All waveform generators now receive `overall_peak` parameter and normalize heights to full 0-31 range.
+
+### Height Floor Assumption (INCORRECT - Reverted 2025-12-27)
+Previous changes added height floors (.max(1)) based on incomplete analysis. Reference data includes height 0, so floors were removed.
 
 ---
 
