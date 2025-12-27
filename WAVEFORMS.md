@@ -24,6 +24,17 @@ Fixed PWV4 (color preview) encoding for needle search waveform:
 - Height range: Changed from 0-31 (5-bit) to 0-127 (full 8-bit)
 - Color encoding: Low freq now uses HIGH color values (0xE0-0xFF), Mid/High use LOW values (0x01-0x30)
 
+#### 3. PWV5 Encoding Fix
+Fixed PWV5 byte order - height was in wrong byte position:
+- Byte 0: `(blue_low3 << 5) | (height & 0x1f)` - height in LOW 5 bits
+- Byte 1: `(red_3bits << 5) | (green_3bits << 2) | blue_high2`
+
+#### 4. PWV5 Height Floor Fix
+Rekordbox uses a minimum height floor of 12 for PWV5:
+- Before: Heights 0-31 (our output had values below 12)
+- After: Heights 12-31 (matching Rekordbox behavior)
+- Formula: `height = 12 + (normalized_peak * 19)`
+
 ### Known Limitations
 - PWV5 colors use crest-factor based coloring (may differ from Rekordbox)
 - Heights normalized to our audio analysis (slight differences from Rekordbox)

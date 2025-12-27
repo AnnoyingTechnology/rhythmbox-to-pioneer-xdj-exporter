@@ -299,9 +299,10 @@ fn generate_pwv5(samples: &[f32], sample_rate: u32, overall_peak: f32) -> Vec<u8
 
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 0-31
+        // Normalize peak relative to track's overall peak, then scale to 12-31
+        // Rekordbox uses a minimum height floor of 12 for PWV5 waveforms
         let normalized_peak = peak / overall_peak;
-        let height = ((normalized_peak * MAX_HEIGHT_PWV5 as f32).min(MAX_HEIGHT_PWV5 as f32) as u8).max(0);
+        let height = 12 + ((normalized_peak * 19.0).min(19.0) as u8);
 
         // Color variation based on RMS/peak ratio (crest factor)
         // Reference files have varied colors - uniform white may be rejected as invalid
