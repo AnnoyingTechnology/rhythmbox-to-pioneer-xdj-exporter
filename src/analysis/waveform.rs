@@ -102,10 +102,10 @@ fn generate_pwav(samples: &[f32], _sample_rate: u32, overall_peak: f32) -> Vec<u
         // Calculate RMS and peak for this window
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 0-31
-        // This ensures the loudest part of the track reaches height 31
+        // Normalize peak relative to track's overall peak, then scale to 1-31
+        // Rekordbox uses minimum height of 1 (never 0) for PWAV
         let normalized_peak = peak / overall_peak;
-        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(0);
+        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
 
         if peak > max_peak {
             max_peak = peak;
@@ -149,9 +149,10 @@ fn generate_pwv2(samples: &[f32], _sample_rate: u32, overall_peak: f32) -> Vec<u
 
         let (_, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 0-15
+        // Normalize peak relative to track's overall peak, then scale to 1-15
+        // Rekordbox uses minimum height of 1 (never 0) for PWV2
         let normalized_peak = peak / overall_peak;
-        let height = ((normalized_peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8).max(0);
+        let height = ((normalized_peak * MAX_HEIGHT_4BIT as f32).min(MAX_HEIGHT_4BIT as f32) as u8).max(1);
         result.push(height);
     }
 
@@ -180,9 +181,10 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32, overall_peak: f32) -> Vec<u8
 
         let (rms, peak) = calculate_rms_and_peak(chunk);
 
-        // Normalize peak relative to track's overall peak, then scale to 0-31
+        // Normalize peak relative to track's overall peak, then scale to 1-31
+        // Rekordbox uses minimum height of 1 (never 0) for PWV3
         let normalized_peak = peak / overall_peak;
-        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(0);
+        let height = ((normalized_peak * MAX_HEIGHT_5BIT as f32).min(MAX_HEIGHT_5BIT as f32) as u8).max(1);
 
         // Whiteness=7 for PWV3 (unlike PWAV which uses 5)
         // Reference files consistently use whiteness=7 for detail waveforms
