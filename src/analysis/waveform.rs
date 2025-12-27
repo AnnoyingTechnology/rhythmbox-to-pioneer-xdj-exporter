@@ -336,13 +336,15 @@ fn encode_pwav_byte(height: u8, whiteness: u8) -> u8 {
     (whiteness << 5) | (height & 0x1f)
 }
 
-/// Encode PWV5 entry (2 bytes): RRR GGG BB | B HHH HH 00
+/// Encode PWV5 entry (2 bytes) per rekordbox_anlz.ksy:
+/// - data[0]: blue[0:2] in bits 7-5, height in bits 4-0
+/// - data[1]: red in bits 7-5, green in bits 4-2, blue[3:4] in bits 1-0
 #[inline]
 fn encode_pwv5_entry(red: u8, green: u8, blue: u8, height: u8) -> [u8; 2] {
-    // Byte 0: RRR GGG BB (red 3, green 3, blue high 2)
-    // Byte 1: B HHH HH 00 (blue low 1, height 5, unused 2)
-    let byte0 = ((red & 0x07) << 5) | ((green & 0x07) << 2) | ((blue >> 1) & 0x03);
-    let byte1 = ((blue & 0x01) << 7) | ((height & 0x1f) << 2);
+    // Byte 0: BBB HHHHH (blue low 3 bits in high, height 5 bits in low)
+    // Byte 1: RRR GGG BB (red 3 high, green 3 mid, blue high 2 bits in low)
+    let byte0 = ((blue & 0x07) << 5) | (height & 0x1f);
+    let byte1 = ((red & 0x07) << 5) | ((green & 0x07) << 2) | ((blue >> 3) & 0x03);
     [byte0, byte1]
 }
 
