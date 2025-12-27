@@ -4,17 +4,30 @@
 
 | Export Type | Rekordbox 5 | XDJ-XZ | Notes |
 |-------------|-------------|--------|-------|
-| 1-10 tracks | **WORKS** | ? | Fixed sequence/unk3 formulas |
-| 11+ tracks | **CORRUPTED** | ? | Under investigation |
+| 1-10 tracks | **NEEDS TESTING** | ? | Table pointer fix applied |
+| 11-25 tracks | **NEEDS TESTING** | ? | Page 51 skip fix applied |
+| 88+ tracks | **NEEDS TESTING** | ? | Multi-overflow validated |
+
+### Recent Fix (2025-12-27): Page 51 Reservation
+
+**Track overflow must skip page 51** (reserved for PlaylistEntries.empty_candidate).
+
+Correct overflow sequence: 50, 52, 53, 54... (never 51)
+
+### Previous Fix: Table Pointers
+
+- Tracks: empty_candidate 51→50
+- Keys: Now header-only (no data page), empty=12, last=11
+- PlaylistEntries: empty_candidate 52→51
 
 ### What Works
 - USB recognition on XDJ-XZ
 - Playlists with correct structure
 - Tracks playable with metadata
-- Exports with 1-10 tracks (fixed 2025-12-27)
+- Dynamic track paging
+- Table pointers now match reference exactly
 
 ### What Doesn't Work
-- **Exports with 11+ tracks** - Under investigation
 - Artwork (see ARTWORK.md)
 - Waveforms display (see WAVEFORMS.md)
 - Track count display (uses static History data)
@@ -33,7 +46,8 @@ Pages 0-40:  Fixed table structure
   Pages 5-6:  Artists
   Pages 7-8:  Albums
   Pages 9-10: Labels (header only)
-  Pages 11-12: Keys
+  Pages 11:   Keys (header only)
+  Pages 12:   Reserved for Keys growth
   Pages 13-14: Colors
   Pages 15-16: Playlists
   Pages 17-18: PlaylistEntries
@@ -43,14 +57,14 @@ Pages 0-40:  Fixed table structure
   Pages 37-38: HistoryEntries
   Pages 39-40: History
 
-Pages 41-52: RESERVED (empty_candidate pointers)
+Pages 41-49: RESERVED (zeros)
   - ALL ZEROS in file
-  - Each table's empty_candidate points here
-  - Reserved for future table growth
+  - Never write page headers here
 
-Pages 53+:   Dynamic track data
-  - Additional track pages for large exports
-  - Skips 41-52 range entirely
+Pages 50+:   Track overflow data
+  - Overflow pages start at 50 (NOT 53!)
+  - Chain: 2 → 50 → 51 → ... → empty_candidate
+  - empty_candidate = max(52, last_overflow + 1)
 ```
 
 ---

@@ -31,6 +31,77 @@ pub struct TrackMetadata {
 // PDB constants
 const PAGE_SIZE: u32 = 4096; // Standard 4KB pages
 const HEAP_START: usize = 0x28; // Data starts at byte 40
+const PAGE_DATA_CAPACITY: usize = 4000; // Safe capacity for data (leaving room for row groups)
+
+/// Estimate the serialized size of a track row
+/// This is an approximation used for packing tracks into pages
+fn estimate_track_row_size(track_meta: &TrackMetadata) -> usize {
+    let track = &track_meta.track;
+
+    // Fixed header: 21 string offsets (u32 each) = 0x54 bytes
+    // Plus padding to 0x88 = 136 bytes total for header
+    let fixed_size: usize = 0x88;
+
+    // Calculate string sizes (each string has 1-4 byte header + content)
+    // We estimate header overhead as 2 bytes average
+    let string_overhead = 21 * 2; // 21 strings, ~2 bytes header each
+
+    // Actual string content lengths (ASCII = 1 byte/char, non-ASCII = 2 bytes/char + 4 byte header)
+    fn string_size(s: &str) -> usize {
+        if s.is_empty() { return 1; } // Empty = 0x03 marker
+        if s.chars().all(|c| c.is_ascii()) {
+            if s.len() <= 126 { s.len() + 2 } // Short ASCII: 1-byte flags + 1-byte len + content
+            else { s.len() + 4 } // Long ASCII
+        } else {
+            s.encode_utf16().count() * 2 + 4 // UTF-16LE + 4-byte header
+        }
+    }
+
+    let mut string_data_size = 0;
+    // String 0-4: empty
+    string_data_size += 5 * 1; // 5 empty strings (0x03 each)
+    // String 5: isrc (empty usually)
+    string_data_size += 1;
+    // String 6: texter (empty)
+    string_data_size += 1;
+    // String 7: unknown7 (empty or content)
+    string_data_size += 1;
+    // String 8: message (empty)
+    string_data_size += 1;
+    // String 9: kuvo_public (empty)
+    string_data_size += 1;
+    // String 10: autoload_hotcues (empty)
+    string_data_size += 1;
+    // String 11: unknown11 (empty)
+    string_data_size += 1;
+    // String 12: date_added (YYYY-MM-DD = 10 chars)
+    string_data_size += 12;
+    // String 13: release_date (empty usually)
+    string_data_size += 1;
+    // String 14: analyze_path
+    string_data_size += string_size(&track_meta.anlz_path.to_string_lossy());
+    // String 15: analyze_date
+    string_data_size += 12;
+    // String 16: comment (empty)
+    string_data_size += 1;
+    // String 17: title
+    string_data_size += string_size(&track.title);
+    // String 18: unknown18 (empty)
+    string_data_size += 1;
+    // String 19: filename
+    let filename = track_meta.file_path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    string_data_size += string_size(&filename);
+    // String 20: file_path
+    string_data_size += string_size(&track_meta.file_path.to_string_lossy());
+
+    // Total + alignment padding + minimum row padding
+    let raw_size = fixed_size + string_overhead + string_data_size;
+    // Round up to 4-byte alignment, then add row padding to at least 344 bytes
+    let aligned = (raw_size + 3) & !3;
+    aligned.max(344)
+}
 
 struct TableLayout {
     table: TableType,
@@ -68,16 +139,19 @@ const TABLE_SEQUENCE: [TableType; 20] = [
 
 const TABLE_LAYOUTS: &[TableLayout] = &[
     // Tables with data (header + data page)
-    TableLayout { table: TableType::Tracks, header_page: 1, data_pages: &[2], empty_candidate: 51, last_page: 2 },
+    // Tracks: empty_candidate=50 in reference (overflow starts at page 50)
+    TableLayout { table: TableType::Tracks, header_page: 1, data_pages: &[2], empty_candidate: 50, last_page: 2 },
     TableLayout { table: TableType::Genres, header_page: 3, data_pages: &[4], empty_candidate: 48, last_page: 4 },
     TableLayout { table: TableType::Artists, header_page: 5, data_pages: &[6], empty_candidate: 47, last_page: 6 },
     TableLayout { table: TableType::Albums, header_page: 7, data_pages: &[8], empty_candidate: 49, last_page: 8 },
     // Labels: empty table - header only, no data page (first==last in reference)
     TableLayout { table: TableType::Labels, header_page: 9, data_pages: &[], empty_candidate: 10, last_page: 9 },
-    TableLayout { table: TableType::Keys, header_page: 11, data_pages: &[12], empty_candidate: 50, last_page: 12 },
+    // Keys: header-only in reference (first=11, last=11, empty=12)
+    TableLayout { table: TableType::Keys, header_page: 11, data_pages: &[], empty_candidate: 12, last_page: 11 },
     TableLayout { table: TableType::Colors, header_page: 13, data_pages: &[14], empty_candidate: 42, last_page: 14 },
     TableLayout { table: TableType::PlaylistTree, header_page: 15, data_pages: &[16], empty_candidate: 46, last_page: 16 },
-    TableLayout { table: TableType::PlaylistEntries, header_page: 17, data_pages: &[18], empty_candidate: 52, last_page: 18 },
+    // PlaylistEntries: empty_candidate=51 in reference
+    TableLayout { table: TableType::PlaylistEntries, header_page: 17, data_pages: &[18], empty_candidate: 51, last_page: 18 },
     // Empty placeholder tables
     TableLayout { table: TableType::Unknown09, header_page: 19, data_pages: &[], empty_candidate: 20, last_page: 19 },
     TableLayout { table: TableType::Unknown0A, header_page: 21, data_pages: &[], empty_candidate: 22, last_page: 21 },
@@ -130,44 +204,73 @@ pub fn write_pdb(
     // Write file header and pre-size the file so all reference pages exist
     write_file_header(&mut file, num_tables)?;
 
-    // Calculate track page allocation
-    // Conservative estimate: ~12 tracks per page to avoid overflow
-    // (track rows are variable size due to strings)
-    // ~350-400 bytes per track, page capacity ~4000 bytes = ~10 tracks max
-    const TRACKS_PER_PAGE: usize = 10;
+    // Split tracks into chunks based on actual row sizes
+    // Pack tracks into pages until we'd exceed PAGE_DATA_CAPACITY
+    let mut track_chunks: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut chunk_start = 0;
+    let mut chunk_size_estimate = 0usize;
 
-    // Split tracks into chunks
-    let mut track_chunks: Vec<&[TrackMetadata]> = Vec::new();
-    let mut remaining = &tracks[..];
-    while !remaining.is_empty() {
-        let chunk_size = remaining.len().min(TRACKS_PER_PAGE);
-        track_chunks.push(&remaining[..chunk_size]);
-        remaining = &remaining[chunk_size..];
+    for (idx, track_meta) in tracks.iter().enumerate() {
+        let row_size = estimate_track_row_size(track_meta);
+
+        // If adding this track would overflow, start a new chunk
+        if chunk_size_estimate + row_size > PAGE_DATA_CAPACITY && idx > chunk_start {
+            track_chunks.push(chunk_start..idx);
+            chunk_start = idx;
+            chunk_size_estimate = 0;
+        }
+        chunk_size_estimate += row_size;
+    }
+    // Add final chunk
+    if chunk_start < tracks.len() {
+        track_chunks.push(chunk_start..tracks.len());
     }
 
-    // Track data pages: use reference page 2 for first batch (up to 10 tracks)
+    log::debug!("Track chunking: {} tracks -> {} pages", tracks.len(), track_chunks.len());
+    for (i, chunk) in track_chunks.iter().enumerate() {
+        log::debug!("  Chunk {}: tracks {}..{} ({} tracks)", i, chunk.start, chunk.end, chunk.end - chunk.start);
+    }
+
+    // Track data pages allocation:
+    // - First page is always page 2 (reference structure)
+    // - Overflow pages start at page 50 (the Tracks empty_candidate position)
+    // - If more overflow needed: 50, 51, 52, then 53+
+    //
+    // Dynamic structure based on reference exports:
+    // - No overflow: 41 pages, next_unused=52, tracks_empty=50
+    // - With overflow: 51 pages, next_unused=53, tracks_empty=52, page 50 = data
     let mut track_data_pages: Vec<u32> = vec![2];
 
-    // For more tracks, allocate pages starting AFTER all empty_candidate values (41-52)
-    // This is critical: pages 41-52 are used as empty_candidate pointers by various tables.
-    // If we create pages in that range, parsers following table chains will find wrong page types.
-    let needs_extra_pages = track_chunks.len() > 1;
-    let mut next_alloc_page = 53u32;  // Start allocating after all empty_candidate pages
-
-    // Add more pages if needed (beyond the 1 reference page)
+    // Add overflow pages starting from page 50
+    // IMPORTANT: Skip page 51 - it's reserved for PlaylistEntries.empty_candidate
+    // Reference pattern: 50, 52, 53, 54, ... (51 is never used for track data)
+    let mut next_alloc_page = 50u32;
     while track_data_pages.len() < track_chunks.len() {
         track_data_pages.push(next_alloc_page);
         next_alloc_page += 1;
+        // Skip page 51 (PlaylistEntries.empty_candidate)
+        if next_alloc_page == 51 {
+            next_alloc_page = 52;
+        }
     }
 
-    // File size depends on whether we need pages beyond the reference 41
-    // - Base layout: pages 0-40 (41 pages) - this is the reference structure
-    // - If we need extra track pages: must include pages 41-52 as placeholders (53 pages minimum)
-    //   plus any additional track pages (53, 54, 55, ...)
-    let file_page_count = if needs_extra_pages {
-        next_alloc_page  // Includes pages 0-52 + any extra track pages
+    let needs_extra_pages = track_chunks.len() > 1;
+
+    // File size and empty_candidate depend on overflow
+    // Note: actual_track_empty_candidate is used later for the table pointer
+    let (file_page_count, actual_track_empty_candidate) = if needs_extra_pages {
+        // With overflow: file extends to include overflow pages
+        // Reference shows 51 pages for 15-20 track exports
+        let last_overflow = track_data_pages[track_chunks.len() - 1];
+        let file_size = (last_overflow + 1).max(51);
+        // empty_candidate = max(52, last_overflow + 1)
+        // For 2 chunks [2, 50]: max(52, 51) = 52
+        // For 4 chunks [2, 50, 51, 52]: max(52, 53) = 53
+        let empty_cand = (last_overflow + 1).max(52);
+        (file_size, empty_cand)
     } else {
-        41  // Reference structure: pages 0-40 only
+        // No overflow: standard 41-page layout
+        (41u32, 50u32)  // empty_candidate stays at 50
     };
     file.set_len((file_page_count as u64) * PAGE_SIZE as u64)?;
     log::debug!("PDB file size: {} pages ({} bytes), track pages: {:?}",
@@ -202,25 +305,53 @@ pub fn write_pdb(
 
                 // Write each track data page
                 let mut current_track_id = 1u32;
-                for (chunk_idx, track_chunk) in track_chunks.iter().enumerate() {
-                    if track_chunk.is_empty() {
+                let mut cumulative_sequence = 10u32; // Base sequence for tracks
+                for (chunk_idx, track_range) in track_chunks.iter().enumerate() {
+                    if track_range.is_empty() {
                         continue;
                     }
 
+                    let track_chunk = &tracks[track_range.clone()];
                     let page_num = track_data_pages[chunk_idx];
                     // Only link to next page if there's actually a next chunk to write
+                    // Use actual_track_empty_candidate (dynamic) not layout.empty_candidate (static)
                     let next_page = if chunk_idx + 1 < track_chunks.len() {
                         track_data_pages[chunk_idx + 1]
                     } else {
-                        layout.empty_candidate
+                        actual_track_empty_candidate
                     };
 
-                    // Sequence: base 10 + (tracks_on_this_page - 1) * 5
-                    // For first page, use tracks in chunk; for subsequent pages, continue from previous
+                    // Sequence: cumulative based on tracks processed
+                    // First page: base + (rows-1)*5
+                    // Subsequent pages: prev_seq + rows*5
+                    // IMPORTANT: When rows >= 11 AND this is the LAST page, add +1
                     let tracks_on_page = track_chunk.len();
-                    let sequence = 10u32 + (tracks_on_page.saturating_sub(1) as u32) * 5;
-                    // unknown4: 0x00 for small pages, 0x01 when page is getting full (11+ tracks)
-                    let unknown4 = if track_chunk.len() >= 11 { 0x01u8 } else { 0x00u8 };
+                    let is_last_page = chunk_idx + 1 >= track_chunks.len();
+                    let sequence = if chunk_idx == 0 {
+                        let base_seq = cumulative_sequence + (tracks_on_page.saturating_sub(1) as u32) * 5;
+                        // Add +1 adjustment for 11+ rows on last page
+                        if tracks_on_page >= 11 && is_last_page {
+                            base_seq + 1
+                        } else {
+                            base_seq
+                        }
+                    } else {
+                        let base_seq = cumulative_sequence + (tracks_on_page as u32) * 5;
+                        // Add +1 adjustment for 11+ rows on last page
+                        if tracks_on_page >= 11 && is_last_page {
+                            base_seq + 1
+                        } else {
+                            base_seq
+                        }
+                    };
+                    cumulative_sequence = sequence;
+                    // unknown4: related to row groups (16 rows per group)
+                    // 0x00 when rows < 10, ceil(rows/16) when rows >= 10
+                    let unknown4 = if tracks_on_page >= 10 {
+                        ((tracks_on_page + 15) / 16) as u8  // ceil(rows/16)
+                    } else {
+                        0x00u8
+                    };
 
                     seek_to_page(&mut file, page_num)?;
                     write_tracks_table(
@@ -311,31 +442,7 @@ pub fn write_pdb(
                 seek_to_page(&mut file, layout.data_pages[0])?;
                 write_albums_table(&mut file, &entities, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
-            // Labels is an empty table (no data) - handled in the empty tables branch below
-            TableType::Keys => {
-                seek_to_page(&mut file, layout.header_page)?;
-                write_page_header(
-                    &mut file,
-                    layout.header_page,
-                    layout.table as u32,
-                    layout.data_pages[0],
-                    0,
-                    0x1fff,
-                    0,
-                    0,
-                    0x64,
-                    1,
-                    0,
-                    0x1fff,
-                    0x03ec,
-                    0,
-                )?;
-                write_header_page_content(&mut file, layout.header_page, Some(layout.data_pages[0]), layout.table)?;
-                patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
-
-                seek_to_page(&mut file, layout.data_pages[0])?;
-                write_keys_table(&mut file, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
-            }
+            // Labels and Keys are empty tables (no data) - handled in the empty tables branch below
             TableType::Colors => {
                 seek_to_page(&mut file, layout.header_page)?;
                 write_page_header(
@@ -534,6 +641,7 @@ pub fn write_pdb(
                 }
             }
             TableType::Labels  // Empty table - no label data
+            | TableType::Keys  // Empty table - header only in reference
             | TableType::Artwork  // Empty table - no artwork data
             | TableType::Unknown09
             | TableType::Unknown0A
@@ -572,55 +680,10 @@ pub fn write_pdb(
         }
     }
 
-    // If file extends beyond page 40, we need to write proper placeholder pages
-    // for empty_candidate pages 41-52. These pages may be reached by parsers
-    // following table chains (via next_page pointers), so they must have correct types.
-    if file_page_count > 41 {
-        // Map of empty_candidate page -> table type
-        // (extracted from TABLE_LAYOUTS)
-        let empty_candidate_types: [(u32, u32); 12] = [
-            (41, 0x13), // History
-            (42, 0x06), // Colors
-            (43, 0x10), // Columns
-            (44, 0x11), // HistoryPlaylists
-            (45, 0x12), // HistoryEntries
-            (46, 0x07), // PlaylistTree
-            (47, 0x02), // Artists
-            (48, 0x01), // Genres
-            (49, 0x03), // Albums
-            (50, 0x05), // Keys
-            (51, 0x00), // Tracks
-            (52, 0x08), // PlaylistEntries
-        ];
-
-        for (page_num, table_type) in empty_candidate_types.iter() {
-            if *page_num < file_page_count {
-                seek_to_page(&mut file, *page_num)?;
-                // Write a "strange" empty page with correct type
-                // page_flags 0x44 indicates a strange/empty page
-                write_page_header(
-                    &mut file,
-                    *page_num,
-                    *table_type,
-                    *page_num + 1, // next_page points to next empty candidate
-                    0,             // num_rows_small
-                    0x1fff,        // num_rows_large (0x1fff = header/strange page)
-                    0,
-                    0,
-                    0x44,          // page_flags for strange/empty page
-                    1,
-                    0,
-                    0x1fff,
-                    0,
-                    0,
-                )?;
-                // Pad to full page
-                let padding = PAGE_SIZE as usize - 0x28;
-                file.write_all(&vec![0u8; padding])?;
-            }
-        }
-        log::debug!("Wrote empty placeholder pages for 41-{}", file_page_count.min(52));
-    }
+    // Note: Pages 41-49 are left as ALL ZEROS in reference exports.
+    // We do NOT write placeholder headers for them - they're just zero-filled.
+    // Only track data overflow pages (50+) get actual content written to them.
+    log::debug!("Pages 41-49 left as zeros (reference behavior)");
 
     // Write table pointers back into the header
     // For tracks, use the actual last data page (based on how many chunks we wrote)
@@ -630,31 +693,29 @@ pub fn write_pdb(
         track_data_pages[track_chunks.len() - 1]
     };
 
+    // Write table pointers at 0x1c
+    // Each table pointer is 16 bytes: table_type, empty_candidate, first_page, last_page
     file.seek(SeekFrom::Start(0x1c))?;
     for layout in TABLE_LAYOUTS {
-        let last_page = if layout.table == TableType::Tracks {
-            actual_track_last_page
+        let (last_page, empty_candidate) = if layout.table == TableType::Tracks {
+            (actual_track_last_page, actual_track_empty_candidate)
         } else {
-            layout.last_page
+            (layout.last_page, layout.empty_candidate)
         };
         write_table_pointer(
             &mut file,
             layout.table as u32,
-            layout.empty_candidate,
+            empty_candidate,
             layout.header_page,
             last_page,
         )?;
     }
 
     // Patch header metadata
-    // 0x0c: next_unused_page - always 53 (points past empty_candidate pages 41-52)
-    //       Even if file is smaller, this reserves the empty_candidate range
-    // 0x10: unknown (5 in reference)
-    // 0x14: sequence - observed patterns:
-    //       1 track: sequence=14
-    //       3 tracks: sequence=31 (approximately 14 + tracks*3 + entities*3)
-    //       For simplicity: use 14 for 1 track, scale for more
-    let next_unused_page = 53u32;  // Always 53, matching reference behavior
+    // next_unused = max(52, empty_candidate + 1)
+    // - No overflow: max(52, 50+1) = 52
+    // - With overflow: max(52, 52+1) = 53, max(52, 53+1) = 54
+    let next_unused_page = (actual_track_empty_candidate + 1).max(52);
     let sequence = if tracks.len() <= 1 {
         14u32  // Match reference-1 exactly
     } else {
@@ -843,12 +904,12 @@ fn write_file_header(file: &mut File, num_tables: u32) -> Result<()> {
     Ok(())
 }
 
-/// Write a table pointer in the header
+/// Write a table pointer in the header (16 bytes: type, empty_candidate, first_page, last_page)
 fn write_table_pointer(file: &mut File, table_type: u32, empty_candidate: u32, first_page: u32, last_page: u32) -> Result<()> {
-    file.write_all(&table_type.to_le_bytes())?; // type
-    file.write_all(&empty_candidate.to_le_bytes())?; // empty_candidate page
-    file.write_all(&first_page.to_le_bytes())?; // first_page
-    file.write_all(&last_page.to_le_bytes())?; // last_page
+    file.write_all(&table_type.to_le_bytes())?;
+    file.write_all(&empty_candidate.to_le_bytes())?;
+    file.write_all(&first_page.to_le_bytes())?;
+    file.write_all(&last_page.to_le_bytes())?;
     Ok(())
 }
 
@@ -1006,6 +1067,17 @@ fn calculate_unk3(rows: usize) -> u8 {
     ((rows % 8) * 0x20) as u8
 }
 
+/// Calculate unknown4 (unk4) based on row count
+/// - 0x00 when rows < 10
+/// - ceil(rows/16) when rows >= 10
+fn calculate_unk4(rows: usize) -> u8 {
+    if rows >= 10 {
+        ((rows + 15) / 16) as u8
+    } else {
+        0
+    }
+}
+
 fn row_group_unknown_high_bit(flags: u16) -> u16 {
     // Full groups (all 16 slots used) have unknown=0
     // Partial groups have unknown = 2^highest_set_bit
@@ -1147,8 +1219,13 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
 
     // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
     let unknown3 = calculate_unk3(genres.len());
-    // Sequence: base 8 for genres + (track_count - 1) * 5
-    let sequence = 8u32 + (track_count.saturating_sub(1) as u32) * 5;
+    // unk4 = 0 when rows < 10, ceil(rows/16) when rows >= 10
+    let unknown4 = calculate_unk4(genres.len());
+    // Sequence: base 8 for genres + (genres_count - 1) * 5
+    // Each table uses ITS OWN row count, not the track count!
+    // IMPORTANT: When rows >= 11 on single-page table (always true for genres), add +1
+    let base_sequence = 8u32 + (genres.len().saturating_sub(1) as u32) * 5;
+    let sequence = if genres.len() >= 11 { base_sequence + 1 } else { base_sequence };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1159,7 +1236,7 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
         num_rows_small,
         num_rows_large,
         unknown3,
-        0x00,
+        unknown4,
         0x24,
         sequence,
         0,
@@ -1206,8 +1283,13 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
 
     // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
     let unknown3 = calculate_unk3(artists.len());
-    // Sequence: base 7 for artists + (track_count - 1) * 5
-    let sequence = 7u32 + (track_count.saturating_sub(1) as u32) * 5;
+    // unk4 = 0 when rows < 10, ceil(rows/16) when rows >= 10
+    let unknown4 = calculate_unk4(artists.len());
+    // Sequence: base 7 for artists + (artists_count - 1) * 5
+    // Each table uses ITS OWN row count, not the track count!
+    // IMPORTANT: When rows >= 11 on single-page table, add +1
+    let base_sequence = 7u32 + (artists.len().saturating_sub(1) as u32) * 5;
+    let sequence = if artists.len() >= 11 { base_sequence + 1 } else { base_sequence };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1218,7 +1300,7 @@ fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, nex
         num_rows_small,
         num_rows_large,
         unknown3,
-        0x00,
+        unknown4,
         0x24,
         sequence,
         0,
@@ -1299,8 +1381,13 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
 
     // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
     let unknown3 = calculate_unk3(albums.len());
-    // Sequence: base 9 for albums + (track_count - 1) * 5
-    let sequence = 9u32 + (track_count.saturating_sub(1) as u32) * 5;
+    // unk4 = 0 when rows < 10, ceil(rows/16) when rows >= 10
+    let unknown4 = calculate_unk4(albums.len());
+    // Sequence: base 9 for albums + (albums_count - 1) * 5
+    // Each table uses ITS OWN row count, not the track count!
+    // IMPORTANT: When rows >= 11 on single-page table, add +1
+    let base_sequence = 9u32 + (albums.len().saturating_sub(1) as u32) * 5;
+    let sequence = if albums.len() >= 11 { base_sequence + 1 } else { base_sequence };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1311,7 +1398,7 @@ fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32,
         num_rows_small,
         num_rows_large,
         unknown3,
-        0x00,
+        unknown4,
         0x24,
         sequence,
         0,
@@ -1858,9 +1945,13 @@ fn write_playlist_entries_table(
 
     // unk3 = (rows % 8) * 0x20 - cyclic pattern based on entry count
     let unknown3 = calculate_unk3(total_entries);
+    // unk4 = 0 when rows < 10, ceil(rows/16) when rows >= 10
+    let unknown4 = calculate_unk4(total_entries);
     // Sequence: base 11 + (entries - 1) * 5
     // This comes after all entity table writes (each track causes 5 table updates)
-    let sequence = 11u32 + (total_entries.saturating_sub(1) as u32) * 5;
+    // IMPORTANT: When rows >= 11 on single-page table, add +1
+    let base_sequence = 11u32 + (total_entries.saturating_sub(1) as u32) * 5;
+    let sequence = if total_entries >= 11 { base_sequence + 1 } else { base_sequence };
 
     let page_start = file.stream_position()?;
     write_page_header(
@@ -1871,7 +1962,7 @@ fn write_playlist_entries_table(
         num_rows_small,
         num_rows_large,
         unknown3,
-        0x00,
+        unknown4,
         0x24,
         sequence,
         0,

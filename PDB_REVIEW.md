@@ -514,6 +514,58 @@ The 11-track boundary suggests something changes when:
 
 ---
 
+## Session 2025-12-27: Table Pointer Discovery (CRITICAL)
+
+### Root Cause of 10+ Track Corruption
+
+**The corruption was caused by incorrect table pointer values in the file header.**
+
+Each table has a 16-byte pointer at offset 0x1c + (table_type * 16):
+```
+[table_type:u32][empty_candidate:u32][first_page:u32][last_page:u32]
+```
+
+### Wrong Values We Had
+
+| Table | Field | WRONG | CORRECT | Impact |
+|-------|-------|-------|---------|--------|
+| Tracks | empty_candidate | 51 | 50 | Overflow pages allocated wrong |
+| Keys | data_pages | [12] | [] | Keys is HEADER-ONLY |
+| Keys | last_page | 12 | 11 | |
+| Keys | empty_candidate | 50 | 12 | |
+| PlaylistEntries | empty_candidate | 52 | 51 | |
+
+### Correct Table Pointer Values
+
+| Table | Type | Header | Data | empty_cand | last_page |
+|-------|------|--------|------|------------|-----------|
+| Tracks | 0 | 1 | 2 | 50 | 2 (or overflow) |
+| Genres | 1 | 3 | 4 | 48 | 4 |
+| Artists | 2 | 5 | 6 | 47 | 6 |
+| Albums | 3 | 7 | 8 | 49 | 8 |
+| Labels | 4 | 9 | - | 10 | 9 |
+| **Keys** | 5 | 11 | **-** | **12** | **11** |
+| Colors | 6 | 13 | 14 | 42 | 14 |
+| PlaylistTree | 7 | 15 | 16 | 46 | 16 |
+| **PlaylistEntries** | 8 | 17 | 18 | **51** | 18 |
+
+### Dynamic Overflow Allocation
+
+When tracks overflow page 2:
+- Overflow starts at page **50** (not 53!)
+- Pages 41-49 remain **ALL ZEROS** (reserved)
+- empty_candidate = `max(52, last_overflow_page + 1)`
+- next_unused = `max(52, empty_candidate + 1)`
+
+### Key Learnings
+
+1. **Each table has its OWN empty_candidate** - not shared
+2. **Keys is header-only** - no data page, first=last=11
+3. **Page 50 is Tracks overflow** - not 53
+4. **Pages 41-49 are always zeros** - never write to them
+
+---
+
 *Generated: 2025-12-26*
-*Updated: 2025-12-27 with formula discovery*
+*Updated: 2025-12-27 with table pointer discovery*
 *Analysis by: Claude Opus 4.5*

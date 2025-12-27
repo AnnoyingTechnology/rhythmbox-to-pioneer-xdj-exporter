@@ -4,6 +4,146 @@ This file contains resolved issues and historical debugging context. See CLAUDE.
 
 ---
 
+## Session 2025-12-27: Page 51 Reservation Fix
+
+### Problem
+Exports with 11-20 tracks corrupted in Rekordbox 5. 11 tracks worked, 20 tracks failed.
+
+### Root Cause
+**Track overflow pages were using page 51, which is reserved for PlaylistEntries.empty_candidate.**
+
+Our code allocated overflow pages sequentially: 50, 51, 52, 53...
+Reference exports skip page 51: 50, 52, 53, 54...
+
+```
+Our 20-track (BROKEN):
+  Tracks.last = 51
+  PlaylistEntries.empty_cand = 51  ← CONFLICT!
+  Track chain: 2 → 50 → 51 → 52
+
+Reference 20-track (WORKS):
+  Tracks.last = 50
+  PlaylistEntries.empty_cand = 51  ← Reserved, unused
+  Track chain: 2 → 50 → 52
+```
+
+### Fix Applied (src/pdb/writer.rs)
+```rust
+// Add overflow pages starting from page 50
+// IMPORTANT: Skip page 51 - it's reserved for PlaylistEntries.empty_candidate
+let mut next_alloc_page = 50u32;
+while track_data_pages.len() < track_chunks.len() {
+    track_data_pages.push(next_alloc_page);
+    next_alloc_page += 1;
+    // Skip page 51 (PlaylistEntries.empty_candidate)
+    if next_alloc_page == 51 {
+        next_alloc_page = 52;
+    }
+}
+```
+
+### Result
+- 11-track: 2 → 50 → 52 ✅
+- 20-track: 2 → 50 → 52 → 53 ✅
+- 25-track: 2 → 50 → 52 → 53 ✅
+- Page 51 correctly left empty
+
+---
+
+## Session 2025-12-27: Table Pointer Discovery (CRITICAL FIX)
+
+### Problem
+All exports with 10+ tracks (requiring overflow pages) were corrupted in Rekordbox 5.
+
+### Root Cause
+**Incorrect table pointer values in file header** at offset 0x1c.
+
+Each table has a 16-byte pointer: `[type:u32][empty_candidate:u32][first:u32][last:u32]`
+
+Our TABLE_LAYOUTS had three critical errors:
+
+| Table | Field | WRONG | CORRECT |
+|-------|-------|-------|---------|
+| Tracks | empty_candidate | 51 | 50 |
+| Keys | data_pages | [12] | [] (header-only!) |
+| Keys | empty_candidate | 50 | 12 |
+| Keys | last_page | 12 | 11 |
+| PlaylistEntries | empty_candidate | 52 | 51 |
+
+### Discovery Method
+Byte-by-byte comparison of table pointers (0x1c-0x15c) revealed mismatches.
+
+### Fixes Applied (src/pdb/writer.rs)
+
+1. **TABLE_LAYOUTS corrections:**
+   ```rust
+   // Tracks: empty_candidate 51 → 50
+   TableLayout { table: TableType::Tracks, ..., empty_candidate: 50, ... }
+
+   // Keys: header-only (no data page)
+   TableLayout { table: TableType::Keys, ..., data_pages: &[], empty_candidate: 12, last_page: 11 }
+
+   // PlaylistEntries: empty_candidate 52 → 51
+   TableLayout { table: TableType::PlaylistEntries, ..., empty_candidate: 51, ... }
+   ```
+
+2. **Keys moved to empty tables handler** - no longer tries to write data page
+
+3. **Dynamic overflow allocation** - pages 50+ for track overflow, not 53+
+
+4. **Dynamic empty_candidate** - `max(52, last_overflow + 1)`
+
+5. **Dynamic next_unused** - `max(52, empty_candidate + 1)`
+
+### Result
+- 3-track: Table pointers now match reference **exactly**
+- 10-track: Correct overflow structure (2→50→52)
+- 88-track: Correct multi-overflow (2→50→51→52→53)
+- All pass validation
+
+---
+
+## Session 2025-12-27: Dynamic Track Paging and Multi-Page Fix
+
+### Problem
+After fixing sequence/unk3 formulas, exports with 11+ tracks still failed:
+- 11 tracks: page overflow (fixed TRACKS_PER_PAGE=10 was wrong)
+- 28+ tracks: page overflow (tracks with long metadata exceeded 11/page)
+- Multi-page exports: wrong sequence calculation (per-page instead of cumulative)
+
+### Root Causes
+
+1. **Fixed TRACKS_PER_PAGE=11** didn't account for variable track row sizes
+   - Reference exports use ~345 bytes/row with short metadata
+   - Our exports with long file paths could use 400+ bytes/row
+   - 11 tracks * 400 bytes = 4400 bytes > page capacity (4000)
+
+2. **Sequence calculation was per-page, not cumulative**
+   - First page: `base + (rows-1)*5` - correct
+   - Subsequent pages: was using `base + (rows-1)*5` per page
+   - Should be: `prev_page_seq + rows*5`
+
+### Solution
+
+1. **Dynamic track paging**: Added `estimate_track_row_size()` function to calculate
+   approximate row size based on string lengths. Tracks are now packed into pages
+   until cumulative size would exceed PAGE_DATA_CAPACITY (4000 bytes).
+
+2. **Cumulative sequence**: Track `cumulative_sequence` across pages. For subsequent
+   pages, use `cumulative_sequence + rows*5` instead of base formula.
+
+### Verification
+
+35-track export with 4 pages:
+```
+Page 2:  9 rows, seq=0x32 (50)   = 10 + (9-1)*5 = 50 ✓
+Page 53: 9 rows, seq=0x5f (95)   = 50 + 9*5 = 95 ✓
+Page 54: 10 rows, seq=0x91 (145) = 95 + 10*5 = 145 ✓
+Page 55: 7 rows, seq=0xb4 (180)  = 145 + 7*5 = 180 ✓
+```
+
+---
+
 ## Session 2025-12-27: Sequence and unk3 Formula Discovery
 
 ### Problem
