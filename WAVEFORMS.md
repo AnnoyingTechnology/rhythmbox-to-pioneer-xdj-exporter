@@ -4,7 +4,13 @@ This document covers waveform generation for Pioneer USB exports.
 
 ## Current Status (2025-12-27)
 
-**Status:** TESTING NEEDED on XDJ-XZ (Height normalization fixed)
+**Status:** TESTING NEEDED on XDJ-XZ (All height floor fixes applied)
+
+### Recent Progress (2025-12-27)
+All waveform height floors now match Rekordbox behavior:
+- PWV5: 12-31 (not 0-31)
+- PWAV/PWV3: 1-31 (not 0-31)
+- PWV2: 1-15 (not 0-15)
 
 ### What Works
 - Monochrome preview display in Rekordbox 5
@@ -34,6 +40,13 @@ Rekordbox uses a minimum height floor of 12 for PWV5:
 - Before: Heights 0-31 (our output had values below 12)
 - After: Heights 12-31 (matching Rekordbox behavior)
 - Formula: `height = 12 + (normalized_peak * 19)`
+
+#### 5. PWAV/PWV2/PWV3 Height Floor Fix
+Rekordbox never uses height 0 in any waveform type:
+- PWAV: Changed from 0-31 to 1-31
+- PWV2: Changed from 0-15 to 1-15
+- PWV3: Changed from 0-31 to 1-31
+- Formula: `.max(1)` applied to all height calculations
 
 ### Known Limitations
 - PWV5 colors use crest-factor based coloring (may differ from Rekordbox)
