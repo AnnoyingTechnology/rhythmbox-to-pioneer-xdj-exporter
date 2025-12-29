@@ -35,6 +35,7 @@ pub struct TrackMetadata {
 const PAGE_SIZE: u32 = 4096; // Standard 4KB pages
 const HEAP_START: usize = 0x28; // Data starts at byte 40
 const PAGE_DATA_CAPACITY: usize = 4000; // Safe capacity for data (leaving room for row groups)
+const ARTWORK_ROW_SIZE: usize = 36; // Fixed size for artwork rows
 
 /// Estimate the serialized size of a track row
 /// This is an approximation used for packing tracks into pages
@@ -145,6 +146,35 @@ fn page_capacity_for_rows(num_rows: usize) -> usize {
     // Page size - header - footer
     let capacity = PAGE_SIZE as usize - HEAP_START - footer_bytes;
     capacity
+}
+
+/// Chunk artworks into page-sized groups (fixed 36-byte rows)
+fn chunk_artworks(artworks: &[ArtworkEntry]) -> Vec<std::ops::Range<usize>> {
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0;
+    let mut chunk_size = 0usize;
+    let mut chunk_rows = 0usize;
+
+    for (idx, _) in artworks.iter().enumerate() {
+        let row_size = ARTWORK_ROW_SIZE;
+        let new_rows = chunk_rows + 1;
+        let capacity = page_capacity_for_rows(new_rows);
+
+        if chunk_size + row_size > capacity && idx > chunk_start {
+            chunks.push(chunk_start..idx);
+            chunk_start = idx;
+            chunk_size = 0;
+            chunk_rows = 0;
+        }
+        chunk_size += row_size;
+        chunk_rows += 1;
+    }
+
+    if chunk_start < artworks.len() {
+        chunks.push(chunk_start..artworks.len());
+    }
+
+    chunks
 }
 
 /// Chunk entities into page-sized groups
@@ -319,6 +349,10 @@ pub fn write_pdb(
     let album_chunks = chunk_entities(&album_names, estimate_album_row_size);
     log::debug!("Album chunking: {} albums -> {} pages", album_names.len(), album_chunks.len());
 
+    // Artwork chunking - fixed 36-byte rows
+    let artwork_chunks = chunk_artworks(artworks);
+    log::debug!("Artwork chunking: {} artworks -> {} pages", artworks.len(), artwork_chunks.len());
+
     // Track data pages allocation:
     // - First page is always page 2 (reference structure)
     // - Overflow pages start at page 50 (the Tracks empty_candidate position)
@@ -394,8 +428,6 @@ pub fn write_pdb(
         }
     }
 
-    let needs_extra_pages = track_chunks.len() > 1 || artist_chunks.len() > 1 || album_chunks.len() > 1;
-
     let actual_album_last_page = album_data_pages[album_data_pages.len() - 1];
     let actual_album_empty_candidate = if album_chunks.len() > 1 {
         actual_album_last_page + 1
@@ -403,26 +435,52 @@ pub fn write_pdb(
         49u32  // Reference value
     };
 
-    // Artwork table values
-    // When artworks exist: first=27 (header), last=28 (data), empty_candidate must be after all data pages
-    // When no artworks: first=27, last=27, empty_candidate=28
+    // Artwork table page allocation
+    // First page is always 28 (reference structure), overflow pages allocated dynamically
     let has_artworks = !artworks.is_empty();
-    let artwork_data_page = if has_artworks { Some(28u32) } else { None };
-    let artwork_last_page = if has_artworks { 28u32 } else { 27u32 };
+    let mut artwork_data_pages: Vec<u32> = if has_artworks { vec![28] } else { vec![] };
+
+    // Allocate overflow pages for artwork if needed
+    if artwork_chunks.len() > 1 {
+        // Start after album empty_candidate
+        let artwork_start_page = if album_chunks.len() > 1 {
+            actual_album_empty_candidate + 1
+        } else {
+            next_alloc_page.max(53)
+        };
+        next_alloc_page = artwork_start_page;
+        while artwork_data_pages.len() < artwork_chunks.len() {
+            artwork_data_pages.push(next_alloc_page);
+            next_alloc_page += 1;
+        }
+    }
+
+    let actual_artwork_last_page = if has_artworks {
+        artwork_data_pages[artwork_data_pages.len() - 1]
+    } else {
+        27u32
+    };
+
+    let needs_extra_pages = track_chunks.len() > 1 || artist_chunks.len() > 1 || album_chunks.len() > 1 || artwork_chunks.len() > 1;
+
     // Calculate artwork_empty_candidate dynamically to avoid conflicts with data pages
     let artwork_empty_candidate = if has_artworks {
-        // Must be after all entity overflow pages
-        let max_used = *[
-            actual_track_empty_candidate,
-            actual_artist_empty_candidate,
-            actual_album_empty_candidate,
-        ].iter().max().unwrap();
-        // For small exports without overflow, use 53 (reference behavior)
-        // For large exports with overflow, use page after last empty_candidate
-        if needs_extra_pages {
-            max_used + 1
+        if artwork_chunks.len() > 1 {
+            actual_artwork_last_page + 1
         } else {
-            53u32
+            // Must be after all entity overflow pages
+            let max_used = *[
+                actual_track_empty_candidate,
+                actual_artist_empty_candidate,
+                actual_album_empty_candidate,
+            ].iter().max().unwrap();
+            // For small exports without overflow, use 53 (reference behavior)
+            // For large exports with overflow, use page after last empty_candidate
+            if needs_extra_pages {
+                max_used + 1
+            } else {
+                53u32
+            }
         }
     } else {
         28u32
@@ -433,6 +491,7 @@ pub fn write_pdb(
         actual_track_last_page,
         actual_artist_last_page,
         actual_album_last_page,
+        actual_artwork_last_page,
     ].iter().max().unwrap();
     let file_page_count = if needs_extra_pages {
         // Include artwork_empty_candidate in page count for large exports with artworks
@@ -454,7 +513,7 @@ pub fn write_pdb(
     log::debug!("  Artist pages: {:?}", &artist_data_pages);
     log::debug!("  Album pages: {:?}", &album_data_pages);
     if has_artworks {
-        log::debug!("  Artwork page: 28, empty_candidate: {}", artwork_empty_candidate);
+        log::debug!("  Artwork pages: {:?}, empty_candidate: {}", artwork_data_pages, artwork_empty_candidate);
     }
 
     log::debug!("Tracks: {} total, {} chunks, pages: {:?}",
@@ -938,9 +997,9 @@ pub fn write_pdb(
                 write_keys_table(&mut file, layout.data_pages[0], layout.empty_candidate, tracks.len())?;
             }
             TableType::Artwork => {
-                // Artwork table: header always at page 27, data at page 28 when artworks exist
+                // Artwork table: header always at page 27, data pages start at 28, overflow allocated dynamically
                 seek_to_page(&mut file, layout.header_page)?;
-                let header_next_page = artwork_data_page.unwrap_or(artwork_empty_candidate);
+                let header_next_page = artwork_data_pages.first().copied().unwrap_or(artwork_empty_candidate);
                 write_page_header(
                     &mut file,
                     layout.header_page,
@@ -957,15 +1016,32 @@ pub fn write_pdb(
                     0x03ec,
                     0,
                 )?;
-                write_header_page_content(&mut file, layout.header_page, artwork_data_page, TableType::Artwork)?;
+                write_header_page_content(&mut file, layout.header_page, artwork_data_pages.first().copied(), TableType::Artwork)?;
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
-                // Write artwork data page if artworks exist
-                if let Some(data_page) = artwork_data_page {
-                    seek_to_page(&mut file, data_page)?;
-                    // Use sequence base 8 for artwork (estimated from reference)
-                    let sequence = 8 + ((artworks.len().saturating_sub(1)) as u32) * 5;
-                    write_artwork_table(&mut file, artworks, data_page, artwork_empty_candidate, sequence)?;
+                // Write artwork data pages (chunked for large collections)
+                if !artwork_chunks.is_empty() {
+                    let mut cumulative_sequence = 8u32; // Base sequence for artwork
+                    for (chunk_idx, artwork_range) in artwork_chunks.iter().enumerate() {
+                        if artwork_range.is_empty() {
+                            continue;
+                        }
+                        let artwork_chunk = &artworks[artwork_range.clone()];
+                        let page_num = artwork_data_pages[chunk_idx];
+                        seek_to_page(&mut file, page_num)?;
+
+                        let next_page = if chunk_idx + 1 < artwork_chunks.len() {
+                            artwork_data_pages[chunk_idx + 1]
+                        } else {
+                            artwork_empty_candidate
+                        };
+
+                        let artworks_on_page = artwork_chunk.len();
+                        let sequence = cumulative_sequence + (artworks_on_page.saturating_sub(1) as u32) * 5;
+                        cumulative_sequence = sequence + 5;
+
+                        write_artwork_table_chunk(&mut file, artwork_chunk, page_num, next_page, sequence)?;
+                    }
                 }
             }
             TableType::Labels  // Empty table - no label data
@@ -1019,7 +1095,7 @@ pub fn write_pdb(
             TableType::Tracks => (actual_track_last_page, actual_track_empty_candidate),
             TableType::Artists => (actual_artist_last_page, actual_artist_empty_candidate),
             TableType::Albums => (actual_album_last_page, actual_album_empty_candidate),
-            TableType::Artwork => (artwork_last_page, artwork_empty_candidate),
+            TableType::Artwork => (actual_artwork_last_page, artwork_empty_candidate),
             _ => (layout.last_page, layout.empty_candidate),
         };
         write_table_pointer(
@@ -1696,19 +1772,19 @@ pub struct ArtworkEntry {
     pub path: String,
 }
 
-/// Write artwork table data page
+/// Write artwork table data page (chunk)
 ///
 /// Artwork row structure:
 ///   0x00-0x03: artwork_id (u32)
 ///   0x04+:     path as DeviceSQL string
-fn write_artwork_table(
+fn write_artwork_table_chunk(
     file: &mut File,
     artworks: &[ArtworkEntry],
     page_index: u32,
     next_page: u32,
     sequence: u32,
 ) -> Result<()> {
-    log::debug!("Writing artwork table: {} artworks to page {}", artworks.len(), page_index);
+    log::debug!("Writing artwork table chunk: {} artworks to page {}", artworks.len(), page_index);
 
     let num_rows_small = artworks.len().min(0xff) as u8;
     let num_rows_large = if artworks.is_empty() { 0 } else { (artworks.len() - 1) as u16 };
@@ -1748,7 +1824,6 @@ fn write_artwork_table(
 
         // Pad row to 36 bytes to match reference
         let row_size = heap.len() - row_start;
-        const ARTWORK_ROW_SIZE: usize = 36;
         if row_size < ARTWORK_ROW_SIZE {
             heap.extend(std::iter::repeat(0u8).take(ARTWORK_ROW_SIZE - row_size));
         }
