@@ -2,82 +2,81 @@
 
 This document covers waveform generation for Pioneer USB exports.
 
-## Current Status (2025-12-27)
+## Current Status (2025-12-29)
 
-**Status:** UNSOLVED - Waveforms display as FLATLINE on XDJ-XZ
+**Status:** ROOT CAUSE IDENTIFIED - ANLZ Path Mismatch
 
-The ANLZ files are structurally correct and byte-for-byte identical to reference when injected.
-The problem is in the **PDB file** - some field tells the XDJ to display flatline.
+The waveforms display correctly on **Rekordbox Desktop** but show as **FLATLINE on XDJ-XZ hardware**.
+
+### Root Cause Discovery
+
+**THE XDJ-XZ COMPUTES ITS OWN ANLZ PATH AND IGNORES THE `analyze_path` IN THE PDB!**
+
+This was confirmed through the following tests:
+
+| Test Variant | Result | Conclusion |
+|--------------|--------|------------|
+| Our export as-is | No waveforms | XDJ can't find ANLZ files |
+| Reference export with exportExt.pdb deleted | Waveforms OK | XDJ doesn't need PDB for path |
+| Reference export with OUR .EXT/.DAT files | Waveforms OK | Our ANLZ files are correct |
+| Our export with reference USBANLZ folder copied | Waveforms OK | Path location is the issue |
+
+**Key Evidence:**
+- Reference path: `P04B/000154A5`
+- Our computed path: `PDFB/00B97834`
+- Both use the SAME audio file path: `/Contents/BROOKLYN BOUNCE/.../This Is The Begining.mp3`
+
+The XDJ hardware looks for ANLZ files at a path computed from the audio file path, **NOT** from the `analyze_path` string stored in the track row.
 
 ---
 
-## XDJ-XZ Hardware Test Results
+## ANLZ Path Algorithm
 
-| Test Variant | Needle Search | Jogwheel | Main Screen | Notes |
-|--------------|---------------|----------|-------------|-------|
-| pwv5 only | Nothing | Nothing | Nothing | PWV5 alone insufficient |
-| pwv4 only | Nothing | Nothing | Nothing | PWV4 alone insufficient |
-| pwv3 only | **WORKS** | **WORKS** | Nothing | Shows FLATLINE |
-| all-ext | Nothing | Nothing | Nothing | Multiple replacements broke it |
-| all-waveforms | **WORKS** | **WORKS** | Nothing | Shows FLATLINE |
-| ref-anlz | **WORKS** | **WORKS** | Nothing | Shows FLATLINE |
-| Complete ref export | **WORKS** | **WORKS** | **WORKS** | Proper dynamic waveform |
+### What We Know
 
-**Key Findings:**
-1. **PWV3 controls needle search + jogwheel** on XDJ-XZ (not PWV4 or PWV5)
-2. **PWV5 controls main screen waveform** - doesn't work in any hybrid export
-3. **FLATLINE issue**: Even with reference PWV3 data, XDJ shows flatline instead of proper waveform
-4. Complete reference export works fully - issue is in our **PDB file**, not ANLZ files
+The ANLZ path format is: `/PIONEER/USBANLZ/PXXX/YYYYYYYY/ANLZ0000.{DAT,EXT}`
+
+Where:
+- `XXX` = 3 hex digits (e.g., `04B`)
+- `YYYYYYYY` = 8 hex digits (e.g., `000154A5`)
+
+### What We've Ruled Out
+
+| Algorithm | Our Result | Expected | Match? |
+|-----------|------------|----------|--------|
+| FNV-1a hash of file path | PDFB/00B97834 | P04B/000154A5 | No |
+| CRC32 of UTF-8 path | 0xE85C7C53 | - | No |
+| CRC32 of UTF-16LE path | 0xB68CE21F | - | No |
+
+### What We Need
+
+The exact algorithm Pioneer uses. Candidates to investigate:
+1. Different hash algorithm (Adler-32, CRC-16, custom)
+2. Input transformation (case folding, path normalization)
+3. Rekordbox internal track ID from local database
+4. Based on a field we haven't identified in the track row
 
 ---
 
-## Investigation Summary
+## Why This Matters
 
-### What Has Been Verified
+1. **Our ANLZ files are correct** - they work when placed at the right path
+2. **Our waveform data is valid** - displays correctly in Rekordbox Desktop
+3. **PDB structure is correct** - Rekordbox 5 reads our exports fine
+4. **Only XDJ hardware fails** - because it computes its own path
 
-1. **ANLZ File Structure** - IDENTICAL to reference
-   - Same section order, sizes, headers
-   - PWV3 at offset 0x82 with correct entry count
-   - Section headers match byte-for-byte
+---
 
-2. **Waveform Data** - IDENTICAL when injected
-   ```
-   Reference PWV3 @ 0x9a: e0e0 e0a0 80a0 c060 a0e0 e0e1 e1e2...
-   Injected PWV3 @ 0x9a: e0e0 e0a0 80a0 c060 a0e0 e0e1 e1e2... (SAME)
-   ```
+## Temporary Workaround
 
-3. **Track Row Waveform Fields** - IDENTICAL
-   | Offset | Field | Ours | Reference |
-   |--------|-------|------|-----------|
-   | 0x08 | sample_rate | 44100 | 44100 |
-   | 0x52 | sample_depth | 16 | 16 |
-   | 0x54 | duration_secs | 1 | 1 |
+Until the path algorithm is reverse-engineered:
 
-4. **String Offsets** - All 21 offsets IDENTICAL
+```bash
+# Copy reference USBANLZ folder structure over our export
+cp -r reference-export/PIONEER/USBANLZ/* our-export/PIONEER/USBANLZ/
+```
 
-5. **analyze_path** - Both point to valid ANLZ locations
-   ```
-   Ours: /PIONEER/USBANLZ/P9CC/00C30E0D/ANLZ0000.DAT
-   Ref:  /PIONEER/USBANLZ/P05C/0001D2C0/ANLZ0000.DAT
-   ```
-
-### Known Differences (May or May Not Affect Waveforms)
-
-| Offset | Field | Ours | Reference | Notes |
-|--------|-------|------|-----------|-------|
-| 0x10 | file_size | 30491 | 34857 | Different audio files |
-| 0x14 | u2 | 21 | 44 | track_id + 20 |
-| 0x20 | key_id | 0 | 1 | We don't detect key |
-| 0x30 | bitrate | 320 | 192 | Hardcoded value |
-
-### Root Cause Hypothesis
-
-The flatline with reference ANLZ data means our PDB is causing the XDJ to misinterpret the waveform.
-
-Possible causes:
-- Some unknown field indicates "waveform not analyzed"
-- A field affecting waveform interpretation we haven't identified
-- Something in the track row structure beyond the fields we've compared
+This makes waveforms work because XDJ finds files at the expected paths.
 
 ---
 
@@ -149,34 +148,36 @@ RGB (3 bits each) | height (5 bits)
 
 ---
 
-## Next Steps for Expert Consultation
+## XDJ-XZ Hardware Test Results
 
-See `help/ask.md` for comprehensive context to share with experts.
+| Test Variant | Needle Search | Jogwheel | Main Screen | Notes |
+|--------------|---------------|----------|-------------|-------|
+| Our export as-is | FLATLINE | FLATLINE | Nothing | Wrong ANLZ path |
+| Reference ANLZ folder | **WORKS** | **WORKS** | **WORKS** | Correct path |
+| Our ANLZ in ref location | **WORKS** | **WORKS** | **WORKS** | Data is valid |
 
-Key questions:
-1. What PDB field could cause FLATLINE despite valid ANLZ data?
-2. Is there an "analyzed" flag in the track row?
-3. Do any unknown fields affect waveform display?
+---
+
+## Next Steps
+
+1. **Reverse-engineer the Pioneer ANLZ path algorithm**
+   - Analyze more reference exports to find patterns
+   - Check pyrekordbox/rekordcrate source for clues
+   - Try different hash algorithms on various inputs
+
+2. **Alternative approaches**
+   - Store both our path AND compute Pioneer's expected path
+   - Use a lookup table for known tracks
 
 ---
 
-## Historical Issues (Resolved)
+## Related Documentation
 
-### PWV4 Generation Bug (Fixed 2025-12-25)
-**Root cause:** `generate_pwv4()` function existed but was never called. The code returned an empty Vec.
-
-### StubAnalyzer Bug (Fixed)
-When using `--no-bpm --no-key`, the StubAnalyzer was returning `WaveformData::minimal_stub()` (empty vectors) instead of calling `generate_waveforms()`.
-
-### Height Normalization Fix (Fixed 2025-12-27)
-All waveform generators now receive `overall_peak` parameter and normalize heights to full 0-31 range.
-
-### Height Floor Assumption (INCORRECT - Reverted 2025-12-27)
-Previous changes added height floors (.max(1)) based on incomplete analysis. Reference data includes height 0, so floors were removed.
-
----
+- **CLAUDE.md** - Project implementation guide
+- **HISTORY.md** - Debugging session history
 
 ## References
 
 - [Deep Symmetry - ANLZ Format](https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html)
-- [rekordbox_anlz.ksy](https://github.com/Deep-Symmetry/crate-digger/blob/main/src/main/kaitai/rekordbox_anlz.ksy)
+- [rekordcrate Library](https://holzhaus.github.io/rekordcrate/)
+- [pyrekordbox](https://github.com/dylanljones/pyrekordbox)

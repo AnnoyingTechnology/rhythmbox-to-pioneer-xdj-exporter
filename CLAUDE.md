@@ -1,33 +1,44 @@
 # Pioneer Exporter - Implementation Guide
 
-## Current Status (2025-12-27)
+## Current Status (2025-12-29)
 
-| Export Type | Rekordbox 5 | XDJ-XZ | Notes |
-|-------------|-------------|--------|-------|
-| Small (1-10) | **WORKS** | **WORKS** | Validated |
-| Medium (11-35) | **WORKS** | **WORKS** | Keys + overflow working |
-| Large (88+) | **WORKS** | **WORKS** | Multi-overflow validated |
-
-### Page Allocation (with Keys)
-
-- **Keys**: page 12 (24 rows), empty=50
-- **Tracks**: empty=51, overflow at 51, 53, 54... (skips 52)
-- **PlaylistEntries**: empty=52
+| Export Type | Rekordbox 5 | XDJ-XZ | Waveforms |
+|-------------|-------------|--------|-----------|
+| Small (1-10) | **WORKS** | **WORKS** | Path mismatch |
+| Medium (11-35) | **WORKS** | **WORKS** | Path mismatch |
+| Large (88+) | **WORKS** | **WORKS** | Path mismatch |
 
 ### What Works
 - USB recognition on XDJ-XZ
 - Playlists with correct structure
 - Tracks playable with metadata
 - Dynamic track paging
-- Table pointers now match reference exactly
+- Table pointers match reference exactly
 - Artwork extraction and display (see ARTWORK.md)
+- Waveforms display correctly in **Rekordbox Desktop**
+- Our ANLZ files are **structurally correct**
 
 ### What Doesn't Work
-- **Waveforms display FLATLINE** (see WAVEFORMS.md)
-  - ANLZ files are structurally correct
-  - Even with reference ANLZ data injected, shows flatline
-  - Issue is in PDB - some unknown field affects waveform display
+- **Waveforms on XDJ-XZ hardware** (ROOT CAUSE IDENTIFIED - see WAVEFORMS.md)
+  - XDJ computes its own ANLZ path, ignores `analyze_path` in PDB
+  - Our path algorithm (FNV-1a) produces different paths than Pioneer
+  - ANLZ files are at wrong location for XDJ to find
+  - **Workaround**: Copy reference USBANLZ folder - waveforms then work
 - Track count display (uses static History data)
+
+---
+
+## ANLZ Path Algorithm (UNSOLVED)
+
+XDJ-XZ hardware computes ANLZ paths independently. The algorithm is **NOT** documented.
+
+**Path format**: `/PIONEER/USBANLZ/PXXX/YYYYYYYY/ANLZ0000.{DAT,EXT}`
+
+**Known facts**:
+- Same audio path produces different ANLZ paths between Rekordbox and our tool
+- Pioneer uses some hash/ID we haven't identified
+- Our FNV-1a implementation produces wrong paths
+- See WAVEFORMS.md for detailed investigation
 
 ---
 
@@ -43,8 +54,7 @@ Pages 0-40:  Fixed table structure
   Pages 5-6:  Artists
   Pages 7-8:  Albums
   Pages 9-10: Labels (header only)
-  Pages 11:   Keys (header only)
-  Pages 12:   Reserved for Keys growth
+  Pages 11-12: Keys
   Pages 13-14: Colors
   Pages 15-16: Playlists
   Pages 17-18: PlaylistEntries
@@ -54,14 +64,13 @@ Pages 0-40:  Fixed table structure
   Pages 37-38: HistoryEntries
   Pages 39-40: History
 
-Pages 41-49: RESERVED (zeros)
+Pages 41-52: RESERVED (zeros)
   - ALL ZEROS in file
   - Never write page headers here
 
-Pages 50+:   Track overflow data
-  - Overflow pages start at 50 (NOT 53!)
-  - Chain: 2 → 50 → 51 → ... → empty_candidate
-  - empty_candidate = max(52, last_overflow + 1)
+Pages 53+:   Track overflow data
+  - Overflow pages for large exports
+  - Chain: 2 → 53 → 54 → ... → empty_candidate
 ```
 
 ---
