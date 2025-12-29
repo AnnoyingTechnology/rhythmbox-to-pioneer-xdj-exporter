@@ -146,6 +146,9 @@ fn convert_entry_to_track(entry: &RhythmboxEntry) -> Option<Track> {
     // Falls back to Rhythmbox XML rating if ID3 read fails
     let rating = read_rating_from_file(&file_path).or(entry.rating);
 
+    // Read bitrate from audio file
+    let bitrate = read_bitrate_from_file(&file_path);
+
     Some(Track {
         id,
         title,
@@ -167,6 +170,7 @@ fn convert_entry_to_track(entry: &RhythmboxEntry) -> Option<Track> {
         year: entry.year,
         comment: entry.comment.clone(),
         rating,
+        bitrate,
     })
 }
 
@@ -229,4 +233,18 @@ fn id3_rating_to_stars(rating_byte: u8) -> Option<u8> {
         160..=223 => Some(4), // 4 stars
         224..=255 => Some(5), // 5 stars
     }
+}
+
+/// Read audio bitrate from file using lofty
+/// Returns bitrate in kbps (e.g., 192, 320)
+fn read_bitrate_from_file(path: &std::path::Path) -> Option<u32> {
+    use lofty::file::AudioFile;
+    use lofty::probe::Probe;
+
+    let tagged_file = Probe::open(path).ok()?.read().ok()?;
+    let properties = tagged_file.properties();
+
+    // lofty returns bitrate in bits per second, convert to kbps
+    let bitrate_bps = properties.audio_bitrate()?;
+    Some(bitrate_bps)
 }

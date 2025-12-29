@@ -2157,9 +2157,12 @@ fn write_tracks_table(
         // 0x10-0x13: file_size
         heap.extend_from_slice(&(track.file_size as u32).to_le_bytes());
 
-        // 0x14-0x17: u2 (unknown, correlates with track id in reference exports)
-        // Reference shows track_id + 20 (e.g., track 1 = 21, track 2 = 22, track 3 = 23)
-        heap.extend_from_slice(&((track_id + 20) as u32).to_le_bytes());
+        // 0x14-0x17: u2 (analysis state flags)
+        // Bit 8 (0x100) appears to indicate "waveform ready" - set in waveform-1 reference
+        // Lower bits vary by track (include track_id + some base)
+        // waveform-1 has 0x106 = bit 1 + bit 2 + bit 8
+        let u2: u32 = (track_id + 5) | 0x100; // Set bit 8 for waveform flag
+        heap.extend_from_slice(&u2.to_le_bytes());
 
         // 0x18-0x19: u3 (unknown, constant 0xe5b6 in reference exports)
         heap.extend_from_slice(&0xe5b6u16.to_le_bytes());
@@ -2171,13 +2174,14 @@ fn write_tracks_table(
         heap.extend_from_slice(&track_meta.artwork_id.to_le_bytes());
 
         // 0x20-0x23: key_id
-        // Use detected key from analysis, or track metadata, or 0 (no key)
+        // Use detected key from analysis, or track metadata, or 1 (C major as safe default)
+        // Expert recommendation: key_id=0 may trigger "not analyzed" heuristic in XDJ
         let key_id = track_meta
             .analysis
             .key
             .or(track.key)
             .map(|k| k.to_rekordbox_id())
-            .unwrap_or(0);
+            .unwrap_or(1); // Default to C major (key_id=1) instead of 0
         heap.extend_from_slice(&key_id.to_le_bytes());
 
         // 0x24-0x27: original_artist_id
@@ -2189,8 +2193,8 @@ fn write_tracks_table(
         // 0x2C-0x2F: remixer_id
         heap.extend_from_slice(&0u32.to_le_bytes());
 
-        // 0x30-0x33: bitrate (MP3 default to 320kbps, otherwise 0)
-        let bitrate = if file_type == FileType::Mp3 as u16 { 320u32 } else { 0u32 };
+        // 0x30-0x33: bitrate (from audio file metadata)
+        let bitrate = track.bitrate.unwrap_or(0);
         heap.extend_from_slice(&bitrate.to_le_bytes());
 
         // 0x34-0x37: track_number (u32!)
@@ -2262,6 +2266,7 @@ fn write_tracks_table(
 
         // --- String offset array (21 x u16 = 42 bytes) ---
         // Offsets are relative to row start
+        // Note: rekordcrate uses 22 but REKORDBOX4/5 exports use 21
         let string_data_start = 0x5E + (21 * 2); // After header + offset array = 136 bytes (0x88)
 
         // Build strings and calculate offsets
@@ -2359,7 +2364,7 @@ fn write_tracks_table(
             heap.extend_from_slice(&offset.to_le_bytes());
         }
 
-        // Verify offset array position
+        // Verify offset array position (94 header + 42 offsets = 136 = 0x88)
         assert_eq!(heap.len() - row_start, 0x88, "String offset array should end at 0x88");
 
         // Write string data

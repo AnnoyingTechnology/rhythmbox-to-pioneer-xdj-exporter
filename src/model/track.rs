@@ -45,6 +45,9 @@ pub struct Track {
 
     /// Rating (0-5 stars, 0 = unrated)
     pub rating: Option<u8>,
+
+    /// Audio bitrate in kbps (e.g., 192, 320)
+    pub bitrate: Option<u32>,
 }
 
 /// Musical key representation (Camelot/Open Key notation)
