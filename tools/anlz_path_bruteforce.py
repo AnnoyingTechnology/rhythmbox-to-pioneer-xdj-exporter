@@ -2,7 +2,14 @@
 """
 Brute-force tool to discover Pioneer's ANLZ path algorithm.
 
-Target: Find what produces P04B/000154A5 for the waveform-1 reference track.
+FINDINGS (2025-12-29):
+- ANLZ path is CONSISTENT across all exports for same audio file
+- Path is NOT based on audio content (empty tracks have different paths)
+- Path MUST be derived from FILE PATH (only thing that differs)
+- Algorithm is NOT: MD5, SHA1/256/512, CRC32, Adler32, FNV-1a, char sum
+- XDJ-XZ computes path from USB data only (no external DB access)
+
+Next step: Reverse engineer rekordbox binary to find exact algorithm.
 """
 
 import hashlib
@@ -10,18 +17,32 @@ import binascii
 import struct
 import sys
 
-# Known reference data
-REFERENCE = {
-    "anlz_path": "P04B/000154A5",
-    "p_value": 0x04B,  # 75 decimal
-    "hash_value": 0x000154A5,  # 87205 decimal
-    "file_path": "/Contents/BROOKLYN BOUNCE/The Theme (Of Progressive Attack)/This Is The Begining.mp3",
-    "track_id": 1,
-    "file_size": 34857,  # from reference
-    "duration_ms": 3456,  # approximate from reference
-    "sample_rate": 44100,
-    "bitrate": 192,
-}
+# Multiple known reference mappings (path -> ANLZ path)
+REFERENCES = [
+    {
+        "file_path": "/Contents/ARTISTTEST1/ALBUMTEST1/TITLETEST1.mp3",
+        "p_value": 0x051,
+        "hash_value": 0x0001D603,
+    },
+    {
+        "file_path": "/Contents/ARTISTTEST2/ALBUMTEST2/TITLETEST2.mp3",
+        "p_value": 0x03C,
+        "hash_value": 0x0000A6CA,
+    },
+    {
+        "file_path": "/Contents/ARTISTTEST3/ALBUMTEST3/TITLETEST3.mp3",
+        "p_value": 0x045,
+        "hash_value": 0x0001096B,
+    },
+    {
+        "file_path": "/Contents/BROOKLYN BOUNCE/The Theme (Of Progressive Attack)/This Is The Begining.mp3",
+        "p_value": 0x04B,
+        "hash_value": 0x000154A5,
+    },
+]
+
+# Legacy single reference for backward compat
+REFERENCE = REFERENCES[3]
 
 # Hash algorithms to try
 HASH_ALGOS = ['md5', 'sha1', 'sha256', 'sha512', 'sha3_256', 'blake2b', 'blake2s']
@@ -297,10 +318,15 @@ def main():
     print("\n" + "="*60)
     print("Brute-force complete.")
     print()
-    print("If no match found, the algorithm likely uses:")
-    print("  1. Rekordbox's internal database track ID (not export ID)")
-    print("  2. A proprietary hash we haven't identified")
-    print("  3. A value stored elsewhere in the master rekordbox database")
+    print("CONFIRMED:")
+    print("  - Path is derived from FILE PATH (empty tracks have different paths)")
+    print("  - Path is CONSISTENT across all exports for same file")
+    print("  - XDJ-XZ computes path from USB data only")
+    print()
+    print("NOT FOUND - Algorithm is not standard hash of file path")
+    print("NEXT STEP: Reverse engineer rekordbox binary to find exact algorithm")
+    print("  - rekordbox/Install_rekordbox_x64_5_8_7.exe (Windows)")
+    print("  - rekordbox/rekordbox.app (macOS)")
     print("="*60)
 
 if __name__ == "__main__":

@@ -4,9 +4,9 @@
 
 | Export Type | Rekordbox 5 | XDJ-XZ | Waveforms |
 |-------------|-------------|--------|-----------|
-| Small (1-10) | **WORKS** | **WORKS** | Path mismatch |
-| Medium (11-35) | **WORKS** | **WORKS** | Path mismatch |
-| Large (88+) | **WORKS** | **WORKS** | Path mismatch |
+| Small (1-10) | **WORKS** | **WORKS** | **WORKS** |
+| Medium (11-35) | **WORKS** | **WORKS** | **WORKS** |
+| Large (88+) | **WORKS** | **WORKS** | **WORKS** |
 
 ### What Works
 - USB recognition on XDJ-XZ
@@ -15,30 +15,32 @@
 - Dynamic track paging
 - Table pointers match reference exactly
 - Artwork extraction and display (see ARTWORK.md)
-- Waveforms display correctly in **Rekordbox Desktop**
-- Our ANLZ files are **structurally correct**
+- **Waveforms on XDJ-XZ hardware** (ANLZ path algorithm reverse-engineered)
 
 ### What Doesn't Work
-- **Waveforms on XDJ-XZ hardware** (ROOT CAUSE IDENTIFIED - see WAVEFORMS.md)
-  - XDJ computes its own ANLZ path, ignores `analyze_path` in PDB
-  - Our path algorithm (FNV-1a) produces different paths than Pioneer
-  - ANLZ files are at wrong location for XDJ to find
-  - **Workaround**: Copy reference USBANLZ folder - waveforms then work
 - Track count display (uses static History data)
 
 ---
 
-## ANLZ Path Algorithm (UNSOLVED)
+## ANLZ Path Algorithm (SOLVED 2025-12-29)
 
-XDJ-XZ hardware computes ANLZ paths independently. The algorithm is **NOT** documented.
+The Pioneer ANLZ path algorithm was reverse-engineered from the rekordbox macOS binary using radare2.
 
-**Path format**: `/PIONEER/USBANLZ/PXXX/YYYYYYYY/ANLZ0000.{DAT,EXT}`
+**Path format**: `/PIONEER/USBANLZ/P{XXX}/{YYYYYYYY}/ANLZ0000.{DAT,EXT}`
 
-**Known facts**:
-- Same audio path produces different ANLZ paths between Rekordbox and our tool
-- Pioneer uses some hash/ID we haven't identified
-- Our FNV-1a implementation produces wrong paths
-- See WAVEFORMS.md for detailed investigation
+**Algorithm** (implemented in `src/export/organizer.rs`):
+```rust
+// Pioneer's rolling hash over UTF-16 code units
+let mut hash: u32 = 0;
+for c in path.chars() {
+    let temp = hash.wrapping_mul(0x5bc9).wrapping_add(c as u32);
+    hash = temp.wrapping_mul(0x93b5).wrapping_add(c as u32);
+}
+hash = hash % 200003;
+// P value = scattered bits from hash
+```
+
+See WAVEFORMS.md for full algorithm details.
 
 ---
 

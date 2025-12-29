@@ -4,57 +4,158 @@ This document covers waveform generation for Pioneer USB exports.
 
 ## Current Status (2025-12-29)
 
-**Status:** ROOT CAUSE IDENTIFIED - ANLZ Path Mismatch
+**Status:** ALGORITHM DISCOVERED AND IMPLEMENTED
 
-The waveforms display correctly on **Rekordbox Desktop** but show as **FLATLINE on XDJ-XZ hardware**.
-
-### Root Cause Discovery
-
-**THE XDJ-XZ COMPUTES ITS OWN ANLZ PATH AND IGNORES THE `analyze_path` IN THE PDB!**
-
-This was confirmed through the following tests:
-
-| Test Variant | Result | Conclusion |
-|--------------|--------|------------|
-| Our export as-is | No waveforms | XDJ can't find ANLZ files |
-| Reference export with exportExt.pdb deleted | Waveforms OK | XDJ doesn't need PDB for path |
-| Reference export with OUR .EXT/.DAT files | Waveforms OK | Our ANLZ files are correct |
-| Our export with reference USBANLZ folder copied | Waveforms OK | Path location is the issue |
-
-**Key Evidence:**
-- Reference path: `P04B/000154A5`
-- Our computed path: `PDFB/00B97834`
-- Both use the SAME audio file path: `/Contents/BROOKLYN BOUNCE/.../This Is The Begining.mp3`
-
-The XDJ hardware looks for ANLZ files at a path computed from the audio file path, **NOT** from the `analyze_path` string stored in the track row.
+Waveforms now work on XDJ-XZ hardware. The ANLZ path hash algorithm was reverse-engineered from the rekordbox binary.
 
 ---
 
-## ANLZ Path Algorithm
+## ANLZ Path Algorithm (SOLVED)
 
-### What We Know
+### Discovery
 
-The ANLZ path format is: `/PIONEER/USBANLZ/PXXX/YYYYYYYY/ANLZ0000.{DAT,EXT}`
+The XDJ-XZ computes its own ANLZ path from the audio file path, ignoring the `analyze_path` in the PDB. The algorithm was reverse-engineered from `CreateAnlzFileFolderPath()` in the rekordbox macOS binary using radare2.
+
+### Path Format
+
+`/PIONEER/USBANLZ/P{XXX}/{YYYYYYYY}/ANLZ0000.{DAT,EXT}`
 
 Where:
-- `XXX` = 3 hex digits (e.g., `04B`)
-- `YYYYYYYY` = 8 hex digits (e.g., `000154A5`)
+- `XXX` = 3 hex digits (P value, scattered bits from hash)
+- `YYYYYYYY` = 8 hex digits (hash result modulo 200003)
 
-### What We've Ruled Out
+### Algorithm
 
-| Algorithm | Our Result | Expected | Match? |
-|-----------|------------|----------|--------|
-| FNV-1a hash of file path | PDFB/00B97834 | P04B/000154A5 | No |
-| CRC32 of UTF-8 path | 0xE85C7C53 | - | No |
-| CRC32 of UTF-16LE path | 0xB68CE21F | - | No |
+```rust
+fn compute_anlz_path_hash(file_path: &str) -> (u16, u32) {
+    let mut hash: u32 = 0;
 
-### What We Need
+    // Process path as UTF-16 code units
+    for c in file_path.chars() {
+        let code_unit = (c as u32) & 0xFFFF;
 
-The exact algorithm Pioneer uses. Candidates to investigate:
-1. Different hash algorithm (Adler-32, CRC-16, custom)
-2. Input transformation (case folding, path normalization)
-3. Rekordbox internal track ID from local database
-4. Based on a field we haven't identified in the track row
+        // Pioneer's rolling hash
+        let temp = hash.wrapping_mul(0x5bc9).wrapping_add(code_unit);
+        hash = temp.wrapping_mul(0x93b5).wrapping_add(code_unit);
+    }
+
+    // Modulo 200003 (0x30d43)
+    let hash_result = hash % 0x30d43;
+
+    // Extract P value from scattered bits
+    let mut p_value: u16 = 0;
+    p_value |= ((hash_result >> 0) & 1) as u16;     // bit 0 -> bit 0
+    p_value |= ((hash_result >> 1) & 2) as u16;     // bit 2 -> bit 1
+    p_value |= ((hash_result >> 4) & 4) as u16;     // bit 6 -> bit 2
+    p_value |= ((hash_result >> 4) & 8) as u16;     // bit 7 -> bit 3
+    p_value |= ((hash_result >> 5) & 0x10) as u16;  // bit 9 -> bit 4
+    p_value |= ((hash_result >> 8) & 0x20) as u16;  // bit 13 -> bit 5
+    p_value |= ((hash_result >> 10) & 0x40) as u16; // bit 16 -> bit 6
+
+    (p_value, hash_result)
+}
+```
+
+### Verified Test Cases
+
+| File Path | Expected P | Expected Hash | Result |
+|-----------|------------|---------------|--------|
+| /Contents/ARTISTTEST1/ALBUMTEST1/TITLETEST1.mp3 | 051 | 0001D603 | MATCH |
+| /Contents/ARTISTTEST2/ALBUMTEST2/TITLETEST2.mp3 | 03C | 0000A6CA | MATCH |
+| /Contents/ARTISTTEST3/ALBUMTEST3/TITLETEST3.mp3 | 045 | 0001096B | MATCH |
+| /Contents/BROOKLYN BOUNCE/.../This Is The Begining.mp3 | 04B | 000154A5 | MATCH |
+
+### Implementation
+
+The algorithm is implemented in `src/export/organizer.rs` in the `compute_anlz_path_hash()` function.
+
+---
+
+## Historical Research (Archived)
+| CRC32 | file path (all encodings) | No match |
+| Adler32 | file path, track ID | No match |
+| FNV-1a | file path | No match |
+| Character sum | file path chars | No match |
+
+**Input variations tested:**
+- File path: original, lowercase, uppercase, no leading slash, backslashes
+- Filename only, without extension
+- Track ID: string, padded, hex
+- Combinations: id+path, path+id, size+path
+
+### Critical Discovery: Paths are CONSISTENT Across Exports
+
+**SAME audio file = SAME ANLZ path in ALL exports:**
+
+| Audio File | ANLZ Path | Exports |
+|------------|-----------|---------|
+| TITLETEST1.mp3 | P051/0001D603 | Same in 10 exports |
+| TITLETEST2.mp3 | P03C/0000A6CA | Same in 9 exports |
+| TITLETEST3.mp3 | P045/0001096B | Same in 8 exports |
+
+This proves:
+1. The path IS deterministic (not random, not export-time ID)
+2. There IS a computable algorithm
+3. We just haven't found it yet
+
+### What's NOT the source
+
+**Critical Test: TITLETEST1/2/3 have IDENTICAL audio content but DIFFERENT ANLZ paths!**
+
+| File | Audio MD5 | ANLZ Path | Conclusion |
+|------|-----------|-----------|------------|
+| TITLETEST1.mp3 | 0x2F... | P051/... | Same audio |
+| TITLETEST2.mp3 | 0x2F... | P03C/... | Different path |
+| TITLETEST3.mp3 | 0x2F... | P045/... | Different path |
+
+This **disproves** audio content hash - the TITLETEST{n} files are empty/silent tracks with identical audio content but different file paths, and they get DIFFERENT ANLZ paths.
+
+**The path MUST be derived from the file path** - we just haven't found the correct algorithm yet.
+
+Tested and ruled out:
+
+| Source | Result | Match? |
+|--------|--------|--------|
+| MD5 of full file | Different per file | No |
+| MD5 of ID3 tag | Different per file | No |
+| MD5 of audio data (no ID3) | SAME for test files | No (paths differ!) |
+| SHA1/SHA256 of audio | SAME for test files | No |
+| File path hash (any algo) | Various | No |
+| CRC32, Adler32, FNV-1a | Various | No |
+
+### Key Constraint: XDJ-XZ Computes Path From USB Data Only
+
+The XDJ-XZ can (and does) compute the ANLZ path using ONLY what's on the USB drive, not the database:
+- Audio files (path, content, metadata)
+- PDB track row data
+- No access to rekordbox.db or any external source
+
+**This means the algorithm MUST use inputs available on the USB.**
+
+Analysis of reference-84 (174 ANLZ files):
+- **Hash values range: 218 - 198,945**
+- **P values range: 0x000 - 0x07A** (93 unique values)
+- Same P value appears for completely different file paths
+
+### What Remains To Test
+
+Since it's not file path, not audio content, the algorithm likely uses:
+1. **Something in the PDB track row** (unknown field we haven't examined)
+2. **File metadata** (creation date, file size, specific ID3 fields)
+3. **A specific byte range** in the audio file we haven't tested
+4. **Combination of multiple inputs**
+
+### Next Step: Binary Reverse Engineering
+
+Rekordbox binaries available for analysis:
+- `rekordbox/Install_rekordbox_x64_5_8_7.exe` (Windows)
+- `rekordbox/rekordbox.app` (macOS)
+
+Approach:
+1. Disassemble the binary
+2. Search for USBANLZ string references
+3. Find the path generation function
+4. Identify exact input values and algorithm
 
 ---
 
@@ -181,3 +282,4 @@ RGB (3 bits each) | height (5 bits)
 - [Deep Symmetry - ANLZ Format](https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/anlz.html)
 - [rekordcrate Library](https://holzhaus.github.io/rekordcrate/)
 - [pyrekordbox](https://github.com/dylanljones/pyrekordbox)
+- [Traktor-Bridge Issue #4](https://github.com/bsm3d/Traktor-Bridge/issues/4) - Same ANLZ path problem, confirms MD5 doesn't work

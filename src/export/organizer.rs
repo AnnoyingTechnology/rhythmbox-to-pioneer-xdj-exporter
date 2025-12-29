@@ -87,26 +87,39 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
-/// Compute ANLZ path components from a file path using FNV-1a hash
+/// Compute ANLZ path components from a file path using Pioneer's hash algorithm
 /// Returns (p_value, hash_value) for the hierarchical path structure
 /// Path format: /PIONEER/USBANLZ/P{XXX}/{XXXXXXXX}/ANLZ0000.{ext}
+///
+/// Algorithm reverse-engineered from rekordbox binary's CreateAnlzFileFolderPath function.
+/// The path is processed as UTF-16 and hashed with a custom rolling hash.
 fn compute_anlz_path_hash(file_path: &str) -> (u16, u32) {
-    let bytes = file_path.as_bytes();
+    // Process path as UTF-16 code units (like Pioneer's implementation)
+    let mut hash: u32 = 0;
 
-    // Compute a 32-bit hash using FNV-1a algorithm
-    let mut hash: u32 = 0x811c9dc5; // FNV offset basis
-    for &byte in bytes {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x01000193); // FNV prime
+    for c in file_path.chars() {
+        let code_unit = (c as u32) & 0xFFFF; // UTF-16 code unit
+
+        // Pioneer's rolling hash: temp = hash * 0x5bc9 + char; hash = temp * 0x93b5 + char
+        let temp = hash.wrapping_mul(0x5bc9).wrapping_add(code_unit);
+        hash = temp.wrapping_mul(0x93b5).wrapping_add(code_unit);
     }
 
-    // P value: use upper 12 bits, masked to 3 hex digits (0x000-0xFFF)
-    let p_value = ((hash >> 20) & 0xFFF) as u16;
+    // Apply modulo 200003 (0x30d43)
+    let hash_result = hash % 0x30d43;
 
-    // Hash value: use lower 24 bits, extended to 8 hex digits
-    let hash_value = hash & 0x00FFFFFF;
+    // Extract P value from scattered bits of the hash
+    // This bit manipulation pattern is from the rekordbox disassembly
+    let mut p_value: u16 = 0;
+    p_value |= ((hash_result >> 0) & 1) as u16;        // bit 0 -> bit 0
+    p_value |= ((hash_result >> 1) & 2) as u16;        // bit 2 -> bit 1
+    p_value |= ((hash_result >> 4) & 4) as u16;        // bit 6 -> bit 2
+    p_value |= ((hash_result >> 4) & 8) as u16;        // bit 7 -> bit 3
+    p_value |= ((hash_result >> 5) & 0x10) as u16;     // bit 9 -> bit 4
+    p_value |= ((hash_result >> 8) & 0x20) as u16;     // bit 13 -> bit 5
+    p_value |= ((hash_result >> 10) & 0x40) as u16;    // bit 16 -> bit 6
 
-    (p_value, hash_value)
+    (p_value, hash_result)
 }
 
 impl UsbOrganizer {
