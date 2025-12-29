@@ -219,10 +219,7 @@ impl UsbOrganizer {
         self.rekordbox_dir.join("export.pdb")
     }
 
-    /// Get the path for the exportExt.pdb file
-    pub fn pdb_ext_path(&self) -> PathBuf {
-        self.rekordbox_dir.join("exportExt.pdb")
-    }
+    // Note: exportExt.pdb is NOT required - tested on XDJ-XZ and Rekordbox 5
 
     /// Get the path for an ANLZ file using hierarchical structure
     ///

@@ -12,7 +12,7 @@ use lofty::probe::Probe;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Standard artwork size for Pioneer (small thumbnail)
 pub const ARTWORK_SIZE_SMALL: u32 = 80;
@@ -201,7 +201,7 @@ impl Default for ArtworkManager {
 }
 
 /// Encode a DynamicImage as JPEG with given quality
-fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
+fn encode_jpeg(img: &DynamicImage, _quality: u8) -> Result<Vec<u8>> {
     let mut buffer = Cursor::new(Vec::new());
     img.write_to(&mut buffer, ImageFormat::Jpeg)
         .context("Failed to encode JPEG")?;

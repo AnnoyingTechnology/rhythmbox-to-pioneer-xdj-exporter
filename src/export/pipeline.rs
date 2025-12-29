@@ -282,10 +282,7 @@ impl<A: AudioAnalyzer> ExportPipeline<A> {
 
         log::info!("PDB file written to: {:?}", pdb_path);
 
-        // Write exportExt.pdb (extended database required by some Pioneer hardware)
-        let pdb_ext_path = self.organizer.pdb_ext_path();
-        crate::pdb::write_pdb_ext(&pdb_ext_path)?;
-        log::info!("PDB ext file written to: {:?}", pdb_ext_path);
+        // Note: exportExt.pdb is NOT required - tested on XDJ-XZ and Rekordbox 5
 
         Ok(())
     }

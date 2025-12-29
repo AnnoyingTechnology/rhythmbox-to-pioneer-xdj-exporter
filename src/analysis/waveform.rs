@@ -177,7 +177,7 @@ fn generate_pwv3(samples: &[f32], sample_rate: u32, overall_peak: f32) -> Vec<u8
         let end = ((i + 1) * samples_per_entry).min(samples.len());
         let chunk = &samples[start..end];
 
-        let (rms, peak) = calculate_rms_and_peak(chunk);
+        let (_rms, peak) = calculate_rms_and_peak(chunk);
 
         // Normalize peak relative to track's overall peak, then scale to 0-31
         // Reference shows height 0 is valid in PWV3 data

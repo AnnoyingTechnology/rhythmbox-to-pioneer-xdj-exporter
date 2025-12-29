@@ -53,6 +53,7 @@ cargo build --release
 
 - **Full export only** - No incremental exports yet; re-exports entire library each time
 - **No analysis cache** - BPM/key/waveforms recomputed on each export
+- **MP3 tag writeback unsupported** - `--cache-bpm` and `--cache-key` only work with FLAC files; the [lofty](https://crates.io/crates/lofty) library cannot write TBPM/TKEY frames to MP3 ID3 tags
 
 ## Documentation
 

@@ -808,7 +808,7 @@ pub fn write_pdb(
                 patch_page_usage(&mut file, layout.header_page as u64 * PAGE_SIZE as u64, 0, 0)?;
 
                 seek_to_page(&mut file, layout.data_pages[0])?;
-                write_columns_table(&mut file, &entities.columns, layout.data_pages[0], layout.empty_candidate)?;
+                write_columns_table(&mut file)?;
             }
             TableType::History => {
                 // History table - use reference data (XDJ requires populated history)
@@ -1057,26 +1057,8 @@ pub fn write_pdb(
     Ok(())
 }
 
-/// Reference exportExt.pdb data - contains waveform preview data that is
-/// required for Pioneer DJ hardware to display waveforms. This file is identical
-/// between different Rekordbox exports (3-track and 20-track exports have the
-/// same exportExt.pdb), so we use static reference data like the History tables.
-const REFERENCE_EXPORTEXT: &[u8] = include_bytes!("../../examples/reference_exportext.pdb");
-
-/// Write exportExt.pdb - extended database file required by Pioneer hardware
-///
-/// Uses reference data that contains waveform preview metadata. This data is
-/// identical across different exports (like History tables), so we copy it
-/// directly rather than generating it.
-pub fn write_pdb_ext(path: &Path) -> Result<()> {
-    log::info!("Writing exportExt.pdb file: {:?}", path);
-
-    std::fs::write(path, REFERENCE_EXPORTEXT)
-        .with_context(|| format!("Failed to write exportExt.pdb file: {:?}", path))?;
-
-    log::info!("exportExt.pdb written successfully (reference data: {} bytes)", REFERENCE_EXPORTEXT.len());
-    Ok(())
-}
+// Note: exportExt.pdb is NOT required - tested on XDJ-XZ and Rekordbox 5
+// Previously we copied a reference file, but hardware works fine without it.
 
 /// Entity tables (deduplicated)
 struct EntityTables {
@@ -1085,17 +1067,12 @@ struct EntityTables {
     genres: Vec<String>,
     artist_map: HashMap<String, u32>,
     album_map: HashMap<String, u32>,
-    album_artist_map: HashMap<String, u32>,
     genre_map: HashMap<String, u32>,
     track_ids: HashMap<String, u32>, // Maps Track.id to PDB row ID
-    columns: Vec<ColumnEntry>,
 }
 
-struct ColumnEntry {
-    id: u16,
-    flags: u16,
-    name: String,
-}
+// Note: ColumnEntry struct was removed - Columns table uses reference data
+// Note: album_artist_map was removed - not used (artist links not yet implemented)
 
 /// Build deduplicated entity tables from tracks
 fn build_entity_tables(tracks: &[TrackMetadata]) -> Result<EntityTables> {
@@ -1104,10 +1081,8 @@ fn build_entity_tables(tracks: &[TrackMetadata]) -> Result<EntityTables> {
     let mut genres = Vec::new();
     let mut artist_map = HashMap::new();
     let mut album_map = HashMap::new();
-    let mut album_artist_map = HashMap::new();
     let mut genre_map = HashMap::new();
     let mut track_ids = HashMap::new();
-    let mut columns = Vec::new();
 
     for (track_idx, track_meta) in tracks.iter().enumerate() {
         let track = &track_meta.track;
@@ -1116,7 +1091,7 @@ fn build_entity_tables(tracks: &[TrackMetadata]) -> Result<EntityTables> {
         track_ids.insert(track.id.clone(), (track_idx + 1) as u32);
 
         // Artist (deduplicate)
-        let artist_id = *artist_map.entry(track.artist.clone())
+        artist_map.entry(track.artist.clone())
             .or_insert_with(|| {
                 let new_id = (artists.len() + 1) as u32;
                 artists.push(track.artist.clone());
@@ -1128,7 +1103,6 @@ fn build_entity_tables(tracks: &[TrackMetadata]) -> Result<EntityTables> {
             let album_id = (albums.len() + 1) as u32;
             album_map.insert(track.album.clone(), album_id);
             albums.push(track.album.clone());
-            album_artist_map.insert(track.album.clone(), artist_id);
         }
 
         // Genre (optional)
@@ -1141,43 +1115,7 @@ fn build_entity_tables(tracks: &[TrackMetadata]) -> Result<EntityTables> {
         }
     }
 
-    // Columns table definition observed in the reference Rekordbox export
-    let column_defs: &[(u16, u16, &str)] = &[
-        (17, 132, "PLAYLIST"),
-        (18, 152, "HOT CUE BANK"),
-        (19, 149, "HISTORY"),
-        (20, 145, "SEARCH"),
-        (21, 150, "COMMENTS"),
-        (22, 140, "DATE ADDED"),
-        (23, 151, "DJ PLAY COUNT"),
-        (24, 144, "FOLDER"),
-        (25, 161, "DEFAULT"),
-        (26, 162, "ALPHABET"),
-        (27, 170, "MATCHING"),
-        (1, 128, "GENRE"),
-        (2, 129, "ARTIST"),
-        (3, 130, "ALBUM"),
-        (4, 131, "TRACK"),
-        (5, 133, "BPM"),
-        (6, 134, "RATING"),
-        (7, 135, "YEAR"),
-        (8, 136, "REMIXER"),
-        (9, 137, "LABEL"),
-        (10, 138, "ORIGINAL ARTIST"),
-        (11, 139, "KEY"),
-        (12, 141, "CUE"),
-        (13, 142, "COLOR"),
-        (14, 146, "TIME"),
-        (15, 147, "BITRATE"),
-        (16, 148, "FILENAME"),
-    ];
-    for (id, flags, name) in column_defs {
-        columns.push(ColumnEntry {
-            id: *id,
-            flags: *flags,
-            name: name.to_string(),
-        });
-    }
+    // Note: Columns table uses reference data, not dynamically generated
 
     Ok(EntityTables {
         artists,
@@ -1185,10 +1123,8 @@ fn build_entity_tables(tracks: &[TrackMetadata]) -> Result<EntityTables> {
         genres,
         artist_map,
         album_map,
-        album_artist_map,
         genre_map,
         track_ids,
-        columns,
     })
 }
 
@@ -1464,14 +1400,6 @@ fn write_blank_page(
     Ok(())
 }
 
-/// Write an empty candidate page (completely zeroed)
-/// Reference exports have empty candidate pages that are all zeros
-fn write_empty_candidate_page(file: &mut File, page_index: u32) -> Result<()> {
-    seek_to_page(file, page_index)?;
-    file.write_all(&vec![0u8; PAGE_SIZE as usize])?;
-    Ok(())
-}
-
 /// Write the header page content that appears after the 40-byte page header
 /// This structure is present in all Rekordbox header pages and contains pointers
 fn write_header_page_content(file: &mut File, header_page: u32, first_data_page: Option<u32>, table_type: TableType) -> Result<()> {
@@ -1535,7 +1463,7 @@ fn write_header_page_content(file: &mut File, header_page: u32, first_data_page:
 }
 
 /// Write genres table (id + name)
-fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_page: u32, track_count: usize) -> Result<()> {
+fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_page: u32, _track_count: usize) -> Result<()> {
     log::debug!("Writing genres table: {} genres", genres.len());
 
     let num_rows_small = genres.len().min(0xff) as u8;
@@ -1598,206 +1526,7 @@ fn write_genres_table(file: &mut File, genres: &[String], page_index: u32, next_
     Ok(())
 }
 
-/// Write artists table
-fn write_artists_table(file: &mut File, artists: &[String], page_index: u32, next_page: u32, track_count: usize) -> Result<()> {
-    log::debug!("Writing artists table: {} artists", artists.len());
-
-    let num_rows_small = artists.len().min(0xff) as u8;
-    // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
-    let num_rows_large = if artists.is_empty() { 0 } else { (artists.len() - 1) as u16 };
-
-    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
-    let unknown3 = calculate_unk3(artists.len());
-    // unk4 = 0 when rows < 10, ceil(rows/16) when rows >= 10
-    let unknown4 = calculate_unk4(artists.len());
-    // Sequence: base 7 for artists + (artists_count - 1) * 5
-    // Each table uses ITS OWN row count, not the track count!
-    // IMPORTANT: When rows >= 11 on single-page table, add +1
-    let base_sequence = 7u32 + (artists.len().saturating_sub(1) as u32) * 5;
-    let sequence = if artists.len() >= 11 { base_sequence + 1 } else { base_sequence };
-
-    let page_start = file.stream_position()?;
-    write_page_header(
-        file,
-        page_index,
-        TableType::Artists as u32,
-        next_page,
-        num_rows_small,
-        num_rows_large,
-        unknown3,
-        unknown4,
-        0x24,
-        sequence,
-        0,
-        0x0001,
-        0,
-        0,
-    )?;
-
-    // Artist row structure (rekordcrate version with OffsetArrayContainer):
-    // Fixed header (8 bytes):
-    // - u16: subtype (0x60 for nearby name using u8 offsets)
-    // - u16: index_shift (0)
-    // - u32: artist_id
-    // Offset array (2 x u8):
-    // - u8: offset[0] (unknown purpose, use 0)
-    // - u8: offset[1] (offset to name string from row start)
-    // Then: DeviceSQL string data at the calculated offset
-
-    let mut heap = Vec::new();
-    let mut row_offsets = Vec::new();
-
-    for (idx, artist) in artists.iter().enumerate() {
-        let row_start = heap.len();
-
-        // Fixed header (8 bytes)
-        heap.extend_from_slice(&0x60u16.to_le_bytes()); // subtype (0x60 = nearby name, u8 offsets)
-        let idx_shift = (idx as u16) * 0x20;  // index_shift increments by 0x20 per row
-        heap.extend_from_slice(&idx_shift.to_le_bytes());
-        heap.extend_from_slice(&((idx + 1) as u32).to_le_bytes()); // ID (1-based)
-
-        // Offset array (2 bytes)
-        heap.push(0x03u8); // offset[0] (constant value 0x03 for u8 offset arrays)
-
-        // Calculate offset to name string from row start
-        let name_offset = 10u8; // String starts at byte 10 (after 8-byte header + 2-byte offset array)
-        heap.push(name_offset); // offset[1] (name offset from row start)
-
-        // Encode and append string data at the offset
-        let encoded_name = encode_device_sql(artist);
-        heap.extend_from_slice(&encoded_name);
-
-        // Pad row to 28 bytes (0x1C) to match reference
-        let row_size = heap.len() - row_start;
-        const ARTIST_ROW_SIZE: usize = 28;
-        if row_size < ARTIST_ROW_SIZE {
-            heap.extend(std::iter::repeat(0u8).take(ARTIST_ROW_SIZE - row_size));
-        }
-
-        row_offsets.push(row_start as u16);
-    }
-
-    // Write heap
-    file.write_all(&heap)?;
-
-    let padding_needed = page_padding(heap.len(), artists.len())?;
-    if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed])?;
-    }
-
-    write_row_groups(file, artists.len(), &row_offsets, row_group_unknown_high_bit)?;
-
-    // Patch usage sizes now that we know padding/heap lengths
-    let free_size = padding_needed as u16;
-    let used_size = heap.len() as u16;
-    patch_page_usage(file, page_start, free_size, used_size)?;
-
-    Ok(())
-}
-
-/// Write albums table (different structure from artists!)
-fn write_albums_table(file: &mut File, entities: &EntityTables, page_index: u32, next_page: u32, track_count: usize) -> Result<()> {
-    let albums = &entities.albums;
-    log::debug!("Writing albums table: {} albums", albums.len());
-
-    let num_rows_small = albums.len().min(0xff) as u8;
-    // num_rows_large is (num_rows - 1) for data pages with rows, per reference export
-    let num_rows_large = if albums.is_empty() { 0 } else { (albums.len() - 1) as u16 };
-
-    // unk3 = (rows % 8) * 0x20 - cyclic pattern based on row count
-    let unknown3 = calculate_unk3(albums.len());
-    // unk4 = 0 when rows < 10, ceil(rows/16) when rows >= 10
-    let unknown4 = calculate_unk4(albums.len());
-    // Sequence: base 9 for albums + (albums_count - 1) * 5
-    // Each table uses ITS OWN row count, not the track count!
-    // IMPORTANT: When rows >= 11 on single-page table, add +1
-    let base_sequence = 9u32 + (albums.len().saturating_sub(1) as u32) * 5;
-    let sequence = if albums.len() >= 11 { base_sequence + 1 } else { base_sequence };
-
-    let page_start = file.stream_position()?;
-    write_page_header(
-        file,
-        page_index,
-        TableType::Albums as u32,
-        next_page,
-        num_rows_small,
-        num_rows_large,
-        unknown3,
-        unknown4,
-        0x24,
-        sequence,
-        0,
-        0x0001,
-        0,
-        0,
-    )?;
-
-    // Album row structure (rekordcrate version with OffsetArrayContainer):
-    // Fixed header (20 bytes):
-    // - u16: subtype (0x80 for nearby name using u8 offsets)
-    // - u16: index_shift (0)
-    // - u32: unknown2 (0)
-    // - u32: artist_id (0 for now, no artist linkage)
-    // - u32: album_id
-    // - u32: unknown3 (0)
-    // Offset array (2 x u8):
-    // - u8: offset[0] (unknown purpose, use 0)
-    // - u8: offset[1] (offset to name string from row start)
-    // Then: DeviceSQL string data at the calculated offset
-
-    let mut heap = Vec::new();
-    let mut row_offsets = Vec::new();
-
-    for (idx, album) in albums.iter().enumerate() {
-        let row_start = heap.len();
-
-        // Fixed header (20 bytes)
-        heap.extend_from_slice(&0x80u16.to_le_bytes()); // subtype (0x80 = nearby name, u8 offsets)
-        let idx_shift = (idx as u16) * 0x20;  // index_shift increments by 0x20 per row
-        heap.extend_from_slice(&idx_shift.to_le_bytes());
-        heap.extend_from_slice(&0u32.to_le_bytes()); // unknown2
-        // Reference exports have artist_id=0 in album rows (no artist linkage)
-        heap.extend_from_slice(&0u32.to_le_bytes()); // artist_id (always 0 to match reference)
-        heap.extend_from_slice(&((idx + 1) as u32).to_le_bytes()); // album_id (1-based)
-        heap.extend_from_slice(&0u32.to_le_bytes()); // unknown3
-
-        // Offset array (2 bytes)
-        heap.push(0x03u8); // offset[0] (constant value 0x03 for u8 offset arrays)
-
-        // Calculate offset to name string from row start
-        let name_offset = 22u8; // String starts at byte 22 (after 20-byte header + 2-byte offset array)
-        heap.push(name_offset); // offset[1] (name offset from row start)
-
-        // Encode and append string data at the offset
-        let encoded_name = encode_device_sql(album);
-        heap.extend_from_slice(&encoded_name);
-
-        // Pad row to 40 bytes (0x28) to match reference
-        let row_size = heap.len() - row_start;
-        const ALBUM_ROW_SIZE: usize = 40;
-        if row_size < ALBUM_ROW_SIZE {
-            heap.extend(std::iter::repeat(0u8).take(ALBUM_ROW_SIZE - row_size));
-        }
-
-        row_offsets.push(row_start as u16);
-    }
-
-    file.write_all(&heap)?;
-
-    let padding_needed = page_padding(heap.len(), albums.len())?;
-    if padding_needed > 0 {
-        file.write_all(&vec![0u8; padding_needed])?;
-    }
-
-    write_row_groups(file, albums.len(), &row_offsets, row_group_unknown_high_bit)?;
-
-    // Patch usage sizes for this page
-    let free_size = padding_needed as u16;
-    let used_size = heap.len() as u16;
-    patch_page_usage(file, page_start, free_size, used_size)?;
-
-    Ok(())
-}
+// Note: write_artists_table and write_albums_table were removed - superseded by _chunk versions
 
 /// Write a chunk of artists to a single page (for multi-page artist tables)
 fn write_artists_table_chunk(
@@ -2799,7 +2528,7 @@ const REFERENCE_HISTORY_PAGE: &[u8; 4096] = include_bytes!("reference_history.bi
 
 /// Write columns table (browse categories)
 /// Uses the reference page data directly since XDJ is sensitive to row group layout
-fn write_columns_table(file: &mut File, _columns: &[ColumnEntry], _page_index: u32, _next_page: u32) -> Result<()> {
+fn write_columns_table(file: &mut File) -> Result<()> {
     log::debug!("Writing columns table: using reference data (27 entries)");
 
     // Write the reference page data directly

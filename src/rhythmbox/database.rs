@@ -149,6 +149,12 @@ fn convert_entry_to_track(entry: &RhythmboxEntry) -> Option<Track> {
     // Read bitrate from audio file
     let bitrate = read_bitrate_from_file(&file_path);
 
+    // Read BPM from ID3 tags (TBPM frame), fallback to Rhythmbox database
+    let bpm = read_bpm_from_file(&file_path).or(entry.bpm);
+
+    // Read key from ID3 tags (TKEY frame)
+    let key = read_key_from_file(&file_path);
+
     Some(Track {
         id,
         title,
@@ -162,8 +168,8 @@ fn convert_entry_to_track(entry: &RhythmboxEntry) -> Option<Track> {
             .unwrap_or_else(|| "Unknown Album".to_string()),
         genre: entry.genre.clone(),
         duration_ms: entry.duration.unwrap_or(0) * 1000, // Convert seconds to ms
-        bpm: entry.bpm,
-        key: None, // Phase 1: no key detection
+        bpm,
+        key,
         file_path,
         file_size,
         track_number: entry.track_number,
@@ -247,4 +253,83 @@ fn read_bitrate_from_file(path: &std::path::Path) -> Option<u32> {
     // lofty returns bitrate in bits per second, convert to kbps
     let bitrate_bps = properties.audio_bitrate()?;
     Some(bitrate_bps)
+}
+
+/// Read BPM from audio file ID3 tags (TBPM frame or Vorbis BPM field)
+fn read_bpm_from_file(path: &std::path::Path) -> Option<f32> {
+    use lofty::file::TaggedFileExt;
+    use lofty::probe::Probe;
+    use lofty::tag::ItemKey;
+
+    let tagged_file = Probe::open(path).ok()?.read().ok()?;
+
+    // Try primary tag first, then any tag
+    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag())?;
+
+    // Get BPM as text and parse to f32
+    let bpm_str = tag.get_string(&ItemKey::Bpm)?;
+    let bpm = bpm_str.parse::<f32>().ok()?;
+
+    if bpm > 0.0 {
+        log::debug!("Read BPM {:.1} from ID3 tags: {:?}", bpm, path);
+        Some(bpm)
+    } else {
+        None
+    }
+}
+
+/// Read musical key from audio file ID3 tags (TKEY frame or Vorbis INITIALKEY)
+fn read_key_from_file(path: &std::path::Path) -> Option<crate::model::MusicalKey> {
+    use lofty::file::TaggedFileExt;
+    use lofty::probe::Probe;
+    use lofty::tag::ItemKey;
+
+    let tagged_file = Probe::open(path).ok()?.read().ok()?;
+
+    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag())?;
+
+    let key_str = tag.get_string(&ItemKey::InitialKey)?;
+    let key = parse_key_string(&key_str)?;
+
+    log::debug!("Read key {} from ID3 tags: {:?}", key.name(), path);
+    Some(key)
+}
+
+/// Parse a key string (e.g., "Am", "C#m", "Gb") to MusicalKey
+fn parse_key_string(s: &str) -> Option<crate::model::MusicalKey> {
+    use crate::model::MusicalKey;
+
+    let lower = s.to_lowercase().trim().to_string();
+
+    match lower.as_str() {
+        // Major keys
+        "c" | "cmaj" | "c major" => Some(MusicalKey::CMajor),
+        "c#" | "db" | "c#maj" | "dbmaj" | "c# major" | "db major" => Some(MusicalKey::DbMajor),
+        "d" | "dmaj" | "d major" => Some(MusicalKey::DMajor),
+        "d#" | "eb" | "d#maj" | "ebmaj" | "d# major" | "eb major" => Some(MusicalKey::EbMajor),
+        "e" | "emaj" | "e major" => Some(MusicalKey::EMajor),
+        "f" | "fmaj" | "f major" => Some(MusicalKey::FMajor),
+        "f#" | "gb" | "f#maj" | "gbmaj" | "f# major" | "gb major" => Some(MusicalKey::GbMajor),
+        "g" | "gmaj" | "g major" => Some(MusicalKey::GMajor),
+        "g#" | "ab" | "g#maj" | "abmaj" | "g# major" | "ab major" => Some(MusicalKey::AbMajor),
+        "a" | "amaj" | "a major" => Some(MusicalKey::AMajor),
+        "a#" | "bb" | "a#maj" | "bbmaj" | "a# major" | "bb major" => Some(MusicalKey::BbMajor),
+        "b" | "bmaj" | "b major" => Some(MusicalKey::BMajor),
+
+        // Minor keys
+        "cm" | "cmin" | "c minor" => Some(MusicalKey::CMinor),
+        "c#m" | "dbm" | "c#min" | "dbmin" | "c# minor" | "db minor" => Some(MusicalKey::CsMinor),
+        "dm" | "dmin" | "d minor" => Some(MusicalKey::DMinor),
+        "d#m" | "ebm" | "d#min" | "ebmin" | "d# minor" | "eb minor" => Some(MusicalKey::EbMinor),
+        "em" | "emin" | "e minor" => Some(MusicalKey::EMinor),
+        "fm" | "fmin" | "f minor" => Some(MusicalKey::FMinor),
+        "f#m" | "gbm" | "f#min" | "gbmin" | "f# minor" | "gb minor" => Some(MusicalKey::FsMinor),
+        "gm" | "gmin" | "g minor" => Some(MusicalKey::GMinor),
+        "g#m" | "abm" | "g#min" | "abmin" | "g# minor" | "ab minor" => Some(MusicalKey::AbMinor),
+        "am" | "amin" | "a minor" => Some(MusicalKey::AMinor),
+        "a#m" | "bbm" | "a#min" | "bbmin" | "a# minor" | "bb minor" => Some(MusicalKey::BbMinor),
+        "bm" | "bmin" | "b minor" => Some(MusicalKey::BMinor),
+
+        _ => None,
+    }
 }

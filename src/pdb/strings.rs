@@ -1,7 +1,6 @@
 //! DeviceSQL string encoding
 
 use super::types::string_flags;
-use std::iter;
 
 /// Check if a string contains only ASCII characters
 fn is_ascii(s: &str) -> bool {
@@ -65,26 +64,7 @@ fn encode_device_sql_utf16(s: &str) -> Vec<u8> {
     out
 }
 
-/// Encode a UTF-16LE DeviceSQL string with the FFFA/FFFB annotations used in the Columns table
-pub fn encode_device_sql_utf16_annotated(s: &str) -> Vec<u8> {
-    // Wrap content with U+FFFA and U+FFFB
-    let annotated: Vec<u16> = iter::once(0xfffau16)
-        .chain(s.encode_utf16())
-        .chain(iter::once(0xfffbu16))
-        .collect();
-
-    let bytes_len = annotated.len() * 2;
-    // Long UTF-16LE format: flags 0x90, length = content bytes + 4, padding byte 0x00, then UTF-16LE content
-    let total_len = (bytes_len + 4) as u16;
-    let mut out = Vec::with_capacity(4 + bytes_len);
-    out.push(string_flags::LONG_UTF16LE);
-    out.extend_from_slice(&total_len.to_le_bytes());
-    out.push(0u8); // padding
-    for unit in annotated {
-        out.extend_from_slice(&unit.to_le_bytes());
-    }
-    out
-}
+// Note: encode_device_sql_utf16_annotated was removed - Columns table uses reference data
 
 #[cfg(test)]
 mod tests {
