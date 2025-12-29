@@ -1,2 +1,5 @@
 /target
 help/*
+rekordbox/*
+**.mp3
+**.flac
