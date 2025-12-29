@@ -123,14 +123,6 @@ fn compute_anlz_path_hash(file_path: &str) -> (u16, u32) {
 5. **P value bit scrambling** - bits are extracted from non-contiguous positions
 6. **Deterministic** - same path always produces same result across all exports
 
-### What Doesn't Work
-
-We tested and ruled out these algorithms before reverse engineering:
-- MD5, SHA1, SHA256, SHA512 of file path
-- CRC32, Adler32, FNV-1a of file path
-- Any hash of audio content (identical audio = different paths if paths differ)
-- Track IDs from database (hardware has no database access)
-
 ---
 
 ## PDB Page Layout
@@ -442,6 +434,7 @@ Each 2-byte entry: [blue:3][green:3][red:3][height:5]
 - xxd - Hex dumps
 - Python struct - Binary parsing
 - XDJ-XZ hardware - Live testing
+- Rekordbox 5 (MacOS) - Live testing
 
 ---
 
