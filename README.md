@@ -1,3 +1,6 @@
+# [!!!!] This project has been superseded by [Sustain](https://github.com/open-sustain/sustain)'s export to Pioneer format [!!!!]
+### [!!!!] This repository while technically working, is a poor quality codebase, which is being refactored and improved in Sustain's exports features [!!!!]
+
 # Pioneer Exporter
 
 Export Rhythmbox playlists to Pioneer USB format for XDJ/CDJ hardware.
